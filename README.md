@@ -7,7 +7,7 @@ A Soar cognitive agent flies an aircraft in X-Plane. Java sits in the middle, pa
 ```
 X-Plane  ⇄  Java (CCAT)  ⇄  Soar agent
    ↑            ↓
- aircraft   QGroundControl (optional, via MAVLink)
+ aircraft   QGroundControl ( via MAVLink)
 ```
 
 ---

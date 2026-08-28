@@ -18,7 +18,7 @@ X-Plane  ⇄  Java (CCAT)  ⇄  Soar agent
 |---|---|
 | **Java JDK** | 8 or newer |
 | **Maven** | any recent version |
-| **X-Plane** | 11 (AW609) or 12 (Beta ALIA-250) |
+| **X-Plane** | 12 (Beta ALIA-250) |
 | **XPlaneConnect plugin** | NASA's [XPC plugin](https://github.com/nasa/XPlaneConnect) — copy into `X-Plane/Resources/plugins/` |
 | **IDE** | IntelliJ recommended for running; VS Code fine for editing |
 

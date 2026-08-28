@@ -62,7 +62,7 @@ Or in IntelliJ: open `java/`, right-click [StartAgents.java](java/src/main/Start
 
 ---
 
-## Optional: QGroundControl
+## QGroundControl
 
 [MAVLinkBridge.java](java/src/main/MAVLinkBridge.java) streams telemetry to QGC. Start QGC and it auto-connects.
 

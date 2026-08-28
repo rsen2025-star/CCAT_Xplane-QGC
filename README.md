@@ -78,10 +78,6 @@ Or in IntelliJ: open `java/`, right-click [StartAgents.java](java/src/main/Start
 | **java/** | The **CCAT** — Java bridge between Soar and X-Plane. Start here. |
 | **agents/** | Soar agents (rules for decision-making + reinforcement learning) |
 | **soar/** | Runtime output: preference values and test results |
-| **Verification/** | nuXmv formal verification models |
-| **architecture/** | AADL models of pilot ⇄ agent communication |
-| **tools/** | Soar → nuXmv translator and helper scripts |
-| **examples/**, **legacy-examples/** | Sample and historical code |
 
 ### Inside `java/src/`
 

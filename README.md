@@ -100,7 +100,6 @@ Or in IntelliJ: open `java/`, right-click [StartAgents.java](java/src/main/Start
 |---|---|
 | `Is X-Plane running?` | X-Plane isn't up, or the XPC plugin in Xplane-12 isn't installed |
 | `FileNotFoundException` on startup | Fix the hardcoded paths in step 3 |
-| Agent loads but nothing moves | Check the aircraft matches the DREFs in use — see `.claude/CLAUDE.md` for the AW609 vs ALIA-250 differences |
 | `0 productions loaded` | Wrong `load.soar` path |
 
 ---

@@ -104,9 +104,6 @@ Or in IntelliJ: open `java/`, right-click [StartAgents.java](java/src/main/Start
 
 ---
 
-## Aircraft support
-
-Currently transitioning from **AW609** (X-Plane 11, 2 tiltrotors) to **Beta ALIA-250** (X-Plane 12, 4 lift rotors + 1 pusher). The two use different datarefs for throttle and VTOL mode — full comparison table in [.claude/CLAUDE.md](.claude/CLAUDE.md).
 
 ---
 

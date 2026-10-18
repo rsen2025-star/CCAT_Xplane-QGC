@@ -23,6 +23,10 @@ import java.io.*;
 import java.util.Iterator;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+// S.E.CHANGE - BM
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+// S.E.CHANGE - BM
 
 import static xplane.XPlaneConnector.getFlightData;
 
@@ -35,6 +39,19 @@ public class CopilotTakeoffAgent extends XPlaneAgent
     boolean isAutomated = true;
     boolean USE_LEARNING = false; //default learning mode set to false
     boolean CHANGE_SENSOR_AUTHORITY = false; //default pilot's choice for changing sensor
+    // S.CHANGE - BM
+    /*
+        Destination the aircraft flies to after takeoff (decimal degrees)
+        The start position is wherever the aircraft is placed in X-Plane
+        Current dest: KMCO (Was testing KORL --> KMCO)
+    */
+    static final double DESTINATION_LAT = 28.4289;
+    static final double DESTINATION_LON = -81.3089;
+    // Land button: the target is moved this far ahead so the agent flies its normal approach
+    // onto it. Must be inside the agent's land-at-target-km (3.5) and beyond slow-km (2.0).
+    static final double LAND_HERE_KM = 3.0;
+    private volatile boolean landHereTargetSet = false;
+    // E.CHANGE - BM
     private SymbolFactory syms;
     Agent sagt = getAgent();
     InputBuilder builder;
@@ -117,6 +134,14 @@ public class CopilotTakeoffAgent extends XPlaneAgent
             e.printStackTrace();
         }
         waypoints = new WaypointController();
+        // S.CHANGE - BM
+        // Seed the sensors with the X-Plane start position so the first cycle isn't at 0,0
+        FlightData startData = getFlightData();
+        waypoints.setDestination(DESTINATION_LAT, DESTINATION_LON);
+        UIobj.setGPSValue((float) startData.lat, (float) startData.lon);
+        UIobj.setIMUValue((float) startData.lat, (float) startData.lon);
+        UIobj.setLidarValue((float) startData.lat, (float) startData.lon);
+        // E.CHANGE - BM
         votingobj = new VotingLogic();
         xpcobj = new XPlaneConnector();
 
@@ -154,6 +179,12 @@ public class CopilotTakeoffAgent extends XPlaneAgent
                 add("abort-landing", UIobj.abortLanding).markWme("abort-landing").
                 add("pilot-selected-landing-zone", "none").markWme("pilot-selected-landing-zone").
                 add("distance-to-target", UIobj.distanceToTarget).markWme("distance-to-target").
+                add("bearing-to-target", 0).markWme("bearing-to-target").  // S.E.CHANGE - BM
+                add("agl", 0.0).markWme("agl").  // S.E.CHANGE - BM
+                add("vertical-speed", 0.0).markWme("vertical-speed").  // S.E.CHANGE - BM
+                add("on-ground", "yes").markWme("on-ground").  // S.E.CHANGE - BM
+                add("pitch", 0.0).markWme("pitch").  // S.E.CHANGE - BM
+                add("groundspeed", 0.0).markWme("groundspeed").  // S.E.CHANGE - BM
 //                add("sensor-alert-accepted", "none").markWme("sensor-alert-accepted").
                 add("alert-sensor-error", errorInSensor).markWme("alert-sensor-error").
                 add("reversersON", reversersON).markWme("reverse").
@@ -164,8 +195,8 @@ public class CopilotTakeoffAgent extends XPlaneAgent
                 add("lidar-reliable", "true").markWme("lidar-reliable");
         try {
 
-            rlWriter = new PrintWriter("D:/AHAMIIAS/soar/preference_values.txt");
-            resultWriter = new PrintWriter("D:/AHAMIIAS/soar/testing_results.txt");
+            rlWriter = new PrintWriter("C:/Users/Brianna/Documents/CCAT_Xplane-QGC-Fresh/soar/preference_values.txt");
+            resultWriter = new PrintWriter("C:/Users/Brianna/Documents/CCAT_Xplane-QGC-Fresh/soar/testing_results.txt");
         } catch (FileNotFoundException e) {
             e.printStackTrace();
         }
@@ -179,7 +210,7 @@ public class CopilotTakeoffAgent extends XPlaneAgent
             //System.out.println(pathToSoar);
             // PATH TO SOAR FILE IMPORTANT
             //pathToSoar = "C:/Users/ahmii/learning_agent/FIT_AHMIIAS-master/lvca/code/LearningPrototype/src/main/soar/com/soartech/integrated-learning-agent/load.soar";
-            pathToSoar = "D:/FIT/Research/NASA/AHMIIAS/soar_agent (Year 3)/Full Learning Agent with Macros/load.soar";
+            pathToSoar = "C:/Users/Brianna/Documents/CCAT_Xplane-QGC-Fresh/agents/Full Learning Agent with Macros/load.soar";
             SoarCommands.source(sagt.getInterpreter(), pathToSoar);
             System.out.println("There are now " + sagt.getProductions().getProductionCount() + " productions loaded");
 
@@ -289,9 +320,63 @@ public class CopilotTakeoffAgent extends XPlaneAgent
                 System.out.println(nextWME.getValue());
 
                 String txt = nextWME.getValue().toString();
-                int altitude = Integer.parseInt(txt);
+                // S.CHANGE - BM
+                int altitude = (int) Double.parseDouble(txt);  // Soar computes some altitudes, which produces decimals
                 xpcobj.setTargetAltitude(altitude);
 
+            }else if (nextWME.getAttribute().asString().getValue().equals("pusher-throttle"))
+            {
+                xpcobj.setPusherThrottle(Float.parseFloat(nextWME.getValue().toString()));
+
+            }else if (nextWME.getAttribute().asString().getValue().equals("autopilot"))
+            {
+                if (isNewCommand(nextWME)) {
+                    if (nextWME.getValue().toString().equalsIgnoreCase("on")) {
+                        xpcobj.engageAutopilot();
+                    } else {
+                        xpcobj.disengageAutopilot();
+                    }
+                }
+
+            }else if (nextWME.getAttribute().asString().getValue().equals("target-heading"))
+            {
+                // "none" until the agent picks a heading
+                String txt = nextWME.getValue().toString();
+                if (isNewCommand(nextWME) && !txt.equalsIgnoreCase("none")) {
+                    xpcobj.setTargetHeading(Double.parseDouble(txt));
+                }
+
+            }else if (nextWME.getAttribute().asString().getValue().equals("target-vs"))
+            {
+                // "none" until the agent first commands a climb/descent
+                String txt = nextWME.getValue().toString();
+                if (isNewCommand(nextWME) && !txt.equalsIgnoreCase("none")) {
+                    xpcobj.setVerticalSpeed(Float.parseFloat(txt));
+                }
+
+            }else if (nextWME.getAttribute().asString().getValue().equals("flight-phase"))
+            {
+                // Mirrors the agent's ^landing phase so the UI shows Land/Abort at the right time
+                String phase = nextWME.getValue().toString();
+                // Log phase changes here
+                if (isNewCommand(nextWME)) {
+                    System.out.println("[Agent] flight phase: " + phase
+                            + " (distance to target " + String.format("%.2f", UIobj.distanceToTarget) + " km)");
+                }
+                UIobj.agentLanding = !phase.equals("no") && !phase.equals("abort") && !phase.equals("landed");
+                if (phase.equals("abort")) {
+                    // Abort received: clear the Land request so the go-around doesn't land again
+                    UIobj.initiateLanding = false;
+                    if (landHereTargetSet) {
+                        // Go back to the real destination after a Land-button landing
+                        waypoints.setDestination(DESTINATION_LAT, DESTINATION_LON);
+                        landHereTargetSet = false;
+                    }
+                } else if (phase.equals("no") && UIobj.abortLanding) {
+                    // Go-around finished, back in cruise
+                    UIobj.abortLanding = false;
+                }
+                // E.CHANGE - BM
             }else if (nextWME.getAttribute().asString().getValue().equals("target-speed"))
             {
                 //System.err.println("HELLO");
@@ -697,18 +782,26 @@ public class CopilotTakeoffAgent extends XPlaneAgent
                     xpcobj.setAutopilot(162);
                 }
 
-                if(xpcobj.getAutopilotState() != 162){
+                // S.CHANGE - BM
+                // Only force the mode during takeoff; in cruise this would cancel the AP's altitude hold
+                if(!UIobj.finishedTakeoff && xpcobj.getAutopilotState() != 162){
                     xpcobj.setAutopilot(162);
 
                 }
+                // While the agent has the AP on (cruise), keep it in HDG mode so it follows the heading
+                xpcobj.holdHeadingMode();
+                // Land button pressed: put the target LAND_HERE_KM straight ahead
+                if (UIobj.initiateLanding && !landHereTargetSet) {
+                    waypoints.setDestinationAhead(latitude, longitude, xpcobj.currentHeading(), LAND_HERE_KM);
+                    landHereTargetSet = true;
+                }
+                // E.CHANGE - BM
 
                 //calculate heading to target waypoint
                 waypoints.updateWaypoints(latitude,longitude);
                 targetHeading = waypoints.calculateHeading(latitude,longitude);
                 UIobj.setTargetWaypoint((float)waypoints.waypoints[waypoints.currentWaypoint].getLat(),(float)waypoints.waypoints[waypoints.currentWaypoint].getLon());
                 UIobj.setDistanceToTarget(waypoints.getDistanceToWaypoint(latitude,longitude));
-                UIobj.displayLandingButton = waypoints.waypoints[waypoints.currentWaypoint].isLandingPoint;
-                xpcobj.setTargetHeading(targetHeading);
 
                 UIobj.planeAirspeed = data.airspeed;
                 UIobj.planeAltitude = data.altitude;
@@ -774,6 +867,22 @@ public class CopilotTakeoffAgent extends XPlaneAgent
 
                 InputWme d = builder.getWme("distance-to-target");
                 d.update(syms.createDouble(UIobj.distanceToTarget));
+                // S.CHANGE - BM
+                float[] verticalState = xpcobj.getVerticalState();
+                // Whole degrees, so the agent only re-commands the heading when it really changes
+                InputWme bearingWme = builder.getWme("bearing-to-target");
+                bearingWme.update(syms.createInteger((int) Math.round(targetHeading) % 360));
+                InputWme aglWme = builder.getWme("agl");
+                aglWme.update(syms.createDouble(verticalState[0]));
+                InputWme vsWme = builder.getWme("vertical-speed");
+                vsWme.update(syms.createDouble(verticalState[1]));
+                InputWme onGroundWme = builder.getWme("on-ground");
+                onGroundWme.update(syms.createString(verticalState[2] > 0.5f ? "yes" : "no"));
+                InputWme pitchWme = builder.getWme("pitch");
+                pitchWme.update(syms.createDouble(verticalState[3]));
+                InputWme groundspeedWme = builder.getWme("groundspeed");
+                groundspeedWme.update(syms.createDouble(verticalState[4]));
+                // E.CHANGE - BM
                 InputWme p = builder.getWme("alt");
                 p.update(syms.createInteger(data.altitude));
                 InputWme e = builder.getWme("engOK");
@@ -808,6 +917,18 @@ public class CopilotTakeoffAgent extends XPlaneAgent
         } ;
     }
 
+    // S.CHANGE - BM
+    //  Last timetag handled per output attribute. Output events repeat every WME each cycle,
+    //  isNewCommand() uses this to run toggle commands (AP, VS) only when Soar changes them.
+    private final Map<String, Integer> appliedTimetags = new ConcurrentHashMap<>();
+
+    // True only the first time a given output WME (by timetag) is seen for its attribute
+    private boolean isNewCommand(Wme wme)
+    {
+        Integer previous = appliedTimetags.put(wme.getAttribute().toString(), wme.getTimetag());
+        return previous == null || previous != wme.getTimetag();
+    }
+    // E.CHANGE - BM
     private void printWme(Wme wme)
     {
         System.out.println(wme);

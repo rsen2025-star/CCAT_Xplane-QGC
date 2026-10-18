@@ -8,9 +8,6 @@ public class WaypointController {
     private double DISTANCE_TO_WAYPOINT_THRESHOLD = 0.5; // When the plane is within this distance of the target waypoint, it will switch to the next waypoint
 
     public WaypointController(){
-        //36.117820739746094,-115.17686462402344
-        double startLat= 36.117820739746094, startLon=-115.17686462402344;
-
         waypoints = new Waypoint[7];
         waypoints[0] = new Waypoint(36.30,-115.17);          // route
         waypoints[1] = new Waypoint(36.40,-115.17);          // route
@@ -22,6 +19,25 @@ public class WaypointController {
         waypoints[6] = new Waypoint(36.117820739746094,-115.17686462402344, true); // option 3 Landing
     }
 
+    // S.CHANGE - BM
+    // Replaces the default landing zone with the given coordinates and steers toward it
+    public synchronized void setDestination(double lat, double lon){
+        waypoints[3] = new Waypoint(lat, lon, true);
+        currentWaypoint = 3;
+        System.out.println("[WaypointController] Destination set to " + lat + ", " + lon);
+    }
+
+    // Sets the destination km ahead of the given position along headingDeg (true), so the
+    // agent's normal approach can land there (used by the pilot's Land button)
+    public synchronized void setDestinationAhead(double lat, double lon, double headingDeg, double km){
+        double lat1 = Math.toRadians(lat), lon1 = Math.toRadians(lon);
+        double brng = Math.toRadians(headingDeg), d = km / EARTH_RADIUS;
+        double lat2 = Math.asin(Math.sin(lat1) * Math.cos(d) + Math.cos(lat1) * Math.sin(d) * Math.cos(brng));
+        double lon2 = lon1 + Math.atan2(Math.sin(brng) * Math.sin(d) * Math.cos(lat1),
+                Math.cos(d) - Math.sin(lat1) * Math.sin(lat2));
+        setDestination(Math.toDegrees(lat2), Math.toDegrees(lon2));
+    }
+    // E.CHANGE - BM
     public void updateWaypoints(double lat, double lon){
         // If plane is within threshold of waypoint, then update waypoint to next point
         if (getDistanceToWaypoint(lat,lon) <= waypoints[currentWaypoint].threshold) {
@@ -40,7 +56,8 @@ public class WaypointController {
         double heading_angle = Math.atan2(Y,X);
         heading_angle = Math.toDegrees(heading_angle);
 
-        return heading_angle;
+        // Autopilot expects a compass heading of 0-360
+        return (heading_angle + 360.0) % 360.0; // S.E.CHANGE - BM
     }
 
     public double getDistanceToWaypoint(double lat, double lon){

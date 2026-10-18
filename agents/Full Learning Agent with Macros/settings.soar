@@ -1,0 +1,27 @@
+##!
+# @file
+#
+# RECONSTRUCTED FILE - missing from the repository upload. This is a
+# GUESSED minimal settings file: safe, conservative Soar/JSoar interpreter
+# defaults, not recovered original values. CopilotTakeoffAgent.java already
+# toggles RL learning and the indifferent-selection policy at runtime
+# ("rl --set learning on/off", "decide indifferent-selection --boltzmann",
+# etc. - see pushFlightData()), so this file intentionally sets only
+# starting defaults and does not fight with what the Java side controls.
+
+echo "\nLoading settings.soar"
+
+# Java steps this agent one decision per telemetry update, so when nothing
+# is proposable the agent should wait for new input instead of subgoaling
+# into an endless chain of state no-change impasses.
+waitsnc --on
+
+# Enable chunking/reinforcement learning support so the RL rules in
+# alert-handling/selection.soar and learning-rewards.soar can update.
+learn --on
+rl --set learning on
+
+# Default indifferent-selection policy; CopilotTakeoffAgent.java overrides
+# this per-trial once learning trials start.
+decide indifferent-selection --boltzmann
+decide indifferent-selection --temperature 25.0

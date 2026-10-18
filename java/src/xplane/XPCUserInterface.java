@@ -34,7 +34,9 @@ public class XPCUserInterface extends JFrame implements Runnable{
     public boolean ErrorSensor = false;
     public boolean errorReseted = false;
     public boolean reroutedLandingZoneSelected = false;
-    public boolean displayLandingButton = false, initiateLanding = false, abortLanding = false, finishedTakeoff = false;
+    public boolean initiateLanding = false, abortLanding = false, finishedTakeoff = false;
+    // True while the Soar agent is in a landing phase (its own descent or a forced landing)
+    public boolean agentLanding = false;
     public int reroutedLandingZone = -1;
     public int learningModeUpdate = -1;
     public int authorityToChangeUpdate = -1;
@@ -305,9 +307,10 @@ public class XPCUserInterface extends JFrame implements Runnable{
             AcknowledgeErrorButton.draw(g);
             DenyErrorButton.draw(g);
         }
-        if(!initiateLanding && displayLandingButton && !sensorChangeLearningObj.learningModeInfo){
+        // Land = land just ahead of the aircraft (the agent's normal approach); only offered in cruise
+        if(!initiateLanding && !agentLanding && finishedTakeoff && !sensorChangeLearningObj.learningModeInfo){
             LandButton.draw(g);
-        }else if(initiateLanding && !abortLanding && !sensorChangeLearningObj.learningModeInfo){
+        }else if((initiateLanding || agentLanding) && !abortLanding && !sensorChangeLearningObj.learningModeInfo){
             AbortLandingButton.draw(g);
         }
         drawTestUI(g);
@@ -494,10 +497,10 @@ public class XPCUserInterface extends JFrame implements Runnable{
                 acknowledgeForError();
             } else if (ErrorSensor && DenyErrorButton.button.intersects(new Rectangle(mx,my,1,1))) {
                 denyForError();
-            }else if(!initiateLanding && LandButton.button.intersects(new Rectangle(mx,my,1,1))){
+            }else if(!initiateLanding && !agentLanding && finishedTakeoff && LandButton.button.intersects(new Rectangle(mx,my,1,1))){
                 //initiate landing
                 initiateLanding = true;
-            }else if(initiateLanding && AbortLandingButton.button.intersects(new Rectangle(mx,my,1,1))){
+            }else if((initiateLanding || agentLanding) && !abortLanding && AbortLandingButton.button.intersects(new Rectangle(mx,my,1,1))){
                 abortLanding = true;
             }else if(landingOptions.getSelectedOption(mx,my) != -1) {
                 reroutedLandingZone = landingOptions.getSelectedOption(mx, my);

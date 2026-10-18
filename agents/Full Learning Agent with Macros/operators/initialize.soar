@@ -27,7 +27,7 @@ sp {apply*initialize
     (<eimu> ^name imu )
     #(<eimu> ^current-value 0.0)
     (<eimu> ^old-value 0.0)
-    (<out> ^target-altitude 5000)
+    (<out> ^target-altitude 2500)
     (<out> ^throttle 0.0)
     (<out> ^autoflaps off)
     (<out> ^air-brake 0.0)

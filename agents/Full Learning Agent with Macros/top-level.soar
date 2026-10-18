@@ -1,0 +1,146 @@
+##!
+# @file
+#
+# RECONSTRUCTED FILE - this file was missing from the repository (only one
+# commit, "Add files via upload", exists for this agent folder, and no copy
+# of the original top-level.soar could be found on this machine or anywhere
+# else in the repo). It has been rebuilt by inferring the propose-side logic
+# that matches the *apply* rules already present in operators/*.soar and
+# alert-handling/*.soar.
+#
+# CONFIDENCE LEVELS (see inline comments per rule):
+#   HIGH    - precondition copied directly from an existing apply rule
+#   MEDIUM  - inferred from Java input-link wiring (CopilotTakeoffAgent.java)
+#   GUESSED - no grounding anywhere in the repo; invented so the agent has
+#             *something* consistent to run, but the throttle and altitude
+#             thresholds are NOT verified against the original agent.
+#
+# Do not trust this for real/simulated flight until reviewed by someone who
+# knows the intended flight profile.
+
+echo "\nLoading top-level.soar"
+
+##############################################
+### HIGH CONFIDENCE
+### Propose "initialize" the very first time the agent runs.
+### initialize.soar's apply rule fires on ^operator.name initialize with no
+### other precondition, so all we need is a condition that is true only
+### before initialization has happened, and false afterward. ^name is not
+### set on the top state until initialize*apply sets it to "takeoff", so
+### "state has no ^name" is the correct, self-terminating trigger.
+##############################################
+sp {top-level*propose*initialize
+    (state <s> ^superstate nil
+              -^name)
+-->
+    (<s> ^operator <o> +)
+    (<o> ^name initialize)
+    (write (crlf) |Proposing initialize|)
+}
+
+##############################################
+### GUESSED - throttle value is a placeholder.
+### initialize.soar sets throttle 0.0, Java's autopilot mode (162) has no
+### auto-throttle, and nothing else raises the throttle, so without this the
+### aircraft never leaves the runway and begin-cruise can never fire.
+##############################################
+sp {top-level*propose*takeoff
+    (state <s> ^name takeoff
+               ^flight-mode vertical
+               ^landing no
+               ^io.output-link <out>)
+    (<out> ^throttle < 1.0)
+-->
+    (<s> ^operator <o> + >)
+    (<o> ^name takeoff)
+}
+
+sp {top-level*apply*takeoff
+    (state <s> ^operator.name takeoff
+               ^io.output-link <out>)
+    (<out> ^throttle <t>)
+-->
+    (<out> ^throttle <t> - 1.0 +)
+    (write (crlf) |Takeoff: throttle to 1.0|)
+}
+
+##############################################
+### MEDIUM CONFIDENCE
+### Transition out of vertical takeoff climb into horizontal cruise once the
+### aircraft nears the target-altitude initialize.soar set on the output-link
+### (2500). This is required for the alert-handling and landing logic below,
+### all of which is gated on ^flight-mode horizontal.
+### The altitude comparison reads io.input-link.flightdata.altitude, which is
+### the live altitude Java pushes in on every cycle (see
+### CopilotTakeoffAgent.java, InputWme p = builder.getWme("alt") - "alt" is
+### just Java's internal lookup label; the WME's actual attribute is
+### "altitude", per builder.push("flightdata")...add("altitude", pitch)).
+##############################################
+# ^landing << no abort >>: never restart cruise during a vertical landing
+# (abort = go-around: climb back to cruise and try the approach again).
+sp {top-level*propose*begin-cruise
+    (state <s> ^flight-mode vertical
+               ^landing << no abort >>
+               ^io.input-link.flightdata <fd>)
+    (<fd> ^altitude <alt> >= 2400)
+-->
+    (<s> ^operator <o> + >)
+    (<o> ^name begin-cruise)
+}
+
+# initialize.soar never creates ^VTOLMode on the output-link, so this must
+# add it rather than replace an existing value.
+sp {top-level*apply*begin-cruise
+    (state <s> ^operator <o>
+               ^flight-mode vertical
+               ^io.output-link <out>)
+    (<o> ^name begin-cruise)
+-->
+    (<s> ^flight-mode vertical - horizontal +)
+    (<out> ^VTOLMode horizontal)
+    (write (crlf) |Beginning horizontal cruise|)
+}
+
+# GUESSED - 0.6 cruise throttle is a placeholder.
+sp {top-level*apply*begin-cruise*throttle
+    (state <s> ^operator.name begin-cruise
+               ^io.output-link <out>)
+    (<out> ^throttle { <t> <> 0.6 })
+-->
+    (<out> ^throttle <t> - 0.6 +)
+}
+
+sp {top-level*apply*begin-cruise*remove-old-vtolmode
+    (state <s> ^operator.name begin-cruise
+               ^io.output-link <out>)
+    (<out> ^VTOLMode { <vmo> <> horizontal })
+-->
+    (<out> ^VTOLMode <vmo> -)
+}
+
+##############################################
+### Cruise altitude and landing are flown in operators/flight-phases.soar.
+### operators/landing-phase-three.soar, landing-phase-four.soar and
+### landing-finished.soar are original files, still loaded but never
+### proposed: their target altitudes (3700, 2250 ft) were set for the
+### original Las Vegas area.
+##############################################
+
+##############################################
+### HIGH CONFIDENCE
+### abort-landing.soar's apply rule accepts any ^landing <l> value (it is not
+### restricted to a particular phase), so it should be proposable throughout
+### the landing sequence whenever the pilot signals an abort on the
+### input-link (Java writes UIobj.abortLanding into "abort-landing", see
+### CopilotTakeoffAgent.java InputWme abortLandingWme).
+##############################################
+# Not once aborted (would re-fire every decision while the button is held)
+# or after touchdown.
+sp {top-level*propose*abort-landing
+    (state <s> ^landing { <l> <> no <> abort <> landed }
+               ^io.input-link.flightdata <fd>)
+    (<fd> ^abort-landing yes)
+-->
+    (<s> ^operator <o> + >)
+    (<o> ^name abort-landing)
+}

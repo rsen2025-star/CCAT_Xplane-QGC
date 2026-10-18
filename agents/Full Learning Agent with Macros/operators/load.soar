@@ -1,0 +1,23 @@
+##!
+# @file
+#
+# RECONSTRUCTED FILE - missing from the repository upload. Rebuilt mechanically
+# to match the exact pattern used by every other load.soar in this agent
+# (alert-handling/load.soar, alert-handling/operators/load.soar,
+# error-handling/load.soar, error-handling/operators/load.soar): one
+# "source" line per sibling file in this directory. High confidence - this
+# file has no logic of its own, just sources what's already here.
+
+echo "\nLoading operators/load.soar"
+
+source "initialize.soar"
+
+source "landing-phase-three.soar"
+
+source "landing-phase-four.soar"
+
+source "landing-finished.soar"
+
+source "abort-landing.soar"
+
+source "flight-phases.soar"

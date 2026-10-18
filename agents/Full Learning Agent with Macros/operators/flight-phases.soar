@@ -1,0 +1,598 @@
+##!
+# @file
+#
+# NEW FILE - the agent flies the trip: vertical takeoff, cruise toward the
+# target on the autopilot, then slows down at cruise altitude and descends
+# vertically onto it (the reverse of takeoff). If the pilot presses Land, Java
+# moves the target a short way ahead and the same approach lands there.
+# Java only supplies inputs and carries out the output-link commands
+# (see CopilotTakeoffAgent.java).
+#
+#   inputs  (io.input-link.flightdata):
+#     altitude (ft MSL), agl (ft above ground), airspeed (kt),
+#     vertical-speed (fpm), distance-to-target (km),
+#     bearing-to-target (whole degrees true), on-ground (yes/no)
+#   outputs (io.output-link):
+#     throttle         lift rotors (existing)
+#     pusher-throttle  forward pusher prop, -1 = follow the lift throttle
+#     autopilot        on/off (Garmin AP servos)
+#     target-heading   degrees true, "none" until first set
+#     target-altitude  ft MSL, the altitude the AP captures (existing)
+#     target-vs        fpm, flies VS mode toward target-altitude, "none" until first set
+#
+# Phases (state ^landing):
+#   no (takeoff + cruise) -> [near the target] -> decelerate
+#     -> vertical-descent -> landed
+#   abort = pilot pressed abort: climb vertically and go around (top-level.soar)
+
+echo "\nLoading flight-phases.soar"
+
+##############################################
+### Parameters and the new output-link commands, created with initialize.
+###   cruise-altitude            ft MSL, captured by the AP in cruise
+###   climb-vs                   fpm toward cruise altitude from below
+###   descend-to-cruise-vs       fpm toward cruise altitude from above
+###   cruise-pusher              pusher throttle in cruise
+###   land-at-target-km          start the approach this far from the target
+###   slow-km                    within this, slow to slow-speed
+###   stop-km                    within this, stop (target speed 0) and stop
+###                              steering at the target
+###   approach-speed / slow-speed  kt target airspeed beyond / within slow-km
+###   speed-deadband             kt: ignore smaller airspeed errors
+###   pusher-gain                pusher throttle change per kt of error, per decision
+###   decel-pitch                deg nose-up the lift throttle holds while slowing
+###   pitch-deadband             deg: ignore smaller pitch errors
+###   lift-pitch-gain            lift throttle change per deg of pitch error, per decision
+###   min-decel-lift             lift throttle never goes below this while slowing,
+###                              so the rotors are never far from hover power
+###   stopped-groundspeed        kt ground speed: below this, AP off and start the
+###                              vertical descent
+###   stopped-airspeed           kt airspeed: below this, also start the vertical
+###                              descent (the wing no longer flies, and with wind
+###                              ground speed may never get below stopped-groundspeed)
+###   max-decel-vs               fpm: climbing faster than this while slowing,
+###                              take lift away instead of adding it
+###   descent-throttle           lift throttle set when the vertical descent starts
+###   low-agl                    ft: below this, descend slower
+###   descent-vs-high/-low       fpm vertical descent above/below low-agl
+###   vs-deadband                fpm: ignore smaller vertical speed errors
+###   lift-step                  lift throttle change per decision in the descent
+###   min-descent-lift           lift throttle never goes below this in the descent
+##############################################
+sp {apply*initialize*flight-phases
+    (state <s> ^operator.name initialize
+               ^io.output-link <out>)
+-->
+    (<s> ^params <p>)
+    (<p> ^cruise-altitude 2500
+         ^climb-vs 500
+         ^descend-to-cruise-vs -500
+         ^cruise-pusher 1.0
+         ^land-at-target-km 3.5
+         ^slow-km 2.0
+         ^stop-km 0.4
+         ^approach-speed 70
+         ^slow-speed 35
+         ^speed-deadband 3
+         ^neg-speed-deadband -3
+         ^pusher-gain 0.005
+         ^decel-pitch 3
+         ^pitch-deadband 1
+         ^neg-pitch-deadband -1
+         ^lift-pitch-gain 0.01
+         ^min-decel-lift 0.3
+         ^stopped-groundspeed 10
+         ^stopped-airspeed 15
+         ^max-decel-vs 300
+         ^descent-throttle 0.75
+         ^low-agl 300
+         ^descent-vs-high -500
+         ^descent-vs-low -150
+         ^vs-deadband 100
+         ^neg-vs-deadband -100
+         ^lift-step 0.02
+         ^neg-lift-step -0.02
+         ^min-descent-lift 0.2)
+    (<out> ^pusher-throttle -1.0
+           ^autopilot off
+           ^target-heading none
+           ^target-vs none)
+}
+
+# Reports the phase to Java (i-supported, follows ^landing) so the UI can
+# show the Land / Abort buttons at the right time.
+sp {flight*elaborate*flight-phase-output
+    (state <s> ^landing <l>
+               ^io.output-link <out>)
+-->
+    (<out> ^flight-phase <l>)
+}
+
+##############################################
+### CRUISE - extra actions for the existing begin-cruise operator
+### (top-level.soar): engage the AP, run the pusher, capture cruise altitude.
+### Each rule only replaces a value that differs; replacing a WME with the
+### same value would remove it.
+##############################################
+sp {apply*begin-cruise*autopilot-on
+    (state <s> ^operator.name begin-cruise
+               ^io.output-link <out>)
+    (<out> ^autopilot { <ap> <> on })
+-->
+    (<out> ^autopilot <ap> - on +)
+}
+
+sp {apply*begin-cruise*pusher
+    (state <s> ^operator.name begin-cruise
+               ^params.cruise-pusher <cp>
+               ^io.output-link <out>)
+    (<out> ^pusher-throttle { <pt> <> <cp> })
+-->
+    (<out> ^pusher-throttle <pt> - <cp> +)
+}
+
+sp {apply*begin-cruise*target-altitude
+    (state <s> ^operator.name begin-cruise
+               ^params.cruise-altitude <ca>
+               ^io.output-link <out>)
+    (<out> ^target-altitude { <ta> <> <ca> })
+-->
+    (<out> ^target-altitude <ta> - <ca> +)
+}
+
+sp {apply*begin-cruise*climb-to-cruise
+    (state <s> ^operator.name begin-cruise
+               ^params <p>
+               ^io <io>)
+    (<p> ^cruise-altitude <ca>
+         ^climb-vs <cvs>)
+    (<io> ^input-link.flightdata.altitude < <ca>
+          ^output-link <out>)
+    (<out> ^target-vs { <tvs> <> <cvs> })
+-->
+    (<out> ^target-vs <tvs> - <cvs> +)
+}
+
+sp {apply*begin-cruise*descend-to-cruise
+    (state <s> ^operator.name begin-cruise
+               ^params <p>
+               ^io <io>)
+    (<p> ^cruise-altitude <ca>
+         ^descend-to-cruise-vs <dvs>)
+    (<io> ^input-link.flightdata.altitude >= <ca>
+          ^output-link <out>)
+    (<out> ^target-vs { <tvs> <> <dvs> })
+-->
+    (<out> ^target-vs <tvs> - <dvs> +)
+}
+
+# A go-around (abort) ends once cruise is re-established.
+sp {apply*begin-cruise*end-go-around
+    (state <s> ^operator.name begin-cruise
+               ^landing abort)
+-->
+    (<s> ^landing abort - no +)
+}
+
+##############################################
+### NAVIGATION - steer the AP toward the target whenever the bearing changes
+### by a degree. Not within stop-km: right over the target the bearing swings
+### around and steering would start a circle. Worst preference so it never
+### blocks other operators.
+##############################################
+sp {flight*propose*follow-bearing
+    (state <s> ^flight-mode horizontal
+               ^params.stop-km <km>
+               ^io <io>)
+    (<io> ^input-link.flightdata <fd>
+          ^output-link.target-heading { <h> <> <b> })
+    (<fd> ^bearing-to-target <b>
+          ^distance-to-target > <km>)
+-->
+    (<s> ^operator <o> + <)
+    (<o> ^name follow-bearing
+         ^bearing <b>
+         ^old-heading <h>)
+}
+
+sp {flight*apply*follow-bearing
+    (state <s> ^operator <o>
+               ^io.output-link <out>)
+    (<o> ^name follow-bearing
+         ^bearing <b>
+         ^old-heading <h>)
+    (<out> ^target-heading <h>)
+-->
+    (<out> ^target-heading <h> - <b> +)
+}
+
+##############################################
+### LANDING - begin-landing once the agent is within land-at-target-km of the
+### current target (distance-to-target / bearing-to-target from Java). Keeps
+### following the bearing so it slows down onto that point. The target is
+### the destination, or a point just ahead when the pilot presses Land; a
+### later divert only needs Java to switch the target (e.g. to the nearest
+### airport). In decelerate the AP keeps holding cruise altitude (descending
+### here would turn altitude into speed) while the pusher slows the aircraft
+### to the SPEED CONTROL target below. The aircraft only goes down once it is
+### nearly stopped, in the vertical descent.
+##############################################
+sp {flight*propose*begin-landing
+    (state <s> ^flight-mode horizontal
+               ^landing no
+               ^params.land-at-target-km <km>
+               ^io.input-link.flightdata.distance-to-target <= <km>)
+-->
+    (<s> ^operator <o> + >)
+    (<o> ^name begin-landing)
+}
+
+sp {flight*apply*begin-landing
+    (state <s> ^operator.name begin-landing
+               ^landing no)
+-->
+    (<s> ^landing no - decelerate +)
+    (write (crlf) |Landing: slowing down|)
+}
+
+##############################################
+### SPEED CONTROL - while decelerating, the pusher holds a target airspeed
+### that drops with distance to the target, so the aircraft neither arrives
+### fast nor stalls out far short of it.
+### One proportional step per decision, like LIFT CONTROL.
+##############################################
+sp {flight*elaborate*target-airspeed*approach
+    (state <s> ^landing decelerate
+               ^params <p>
+               ^io.input-link.flightdata <fd>)
+    (<p> ^slow-km <slow>
+         ^approach-speed <v>)
+    (<fd> ^distance-to-target > <slow>)
+-->
+    (<s> ^target-airspeed <v>)
+}
+
+sp {flight*elaborate*target-airspeed*slow
+    (state <s> ^landing decelerate
+               ^params <p>
+               ^io.input-link.flightdata <fd>)
+    (<p> ^slow-km <slow>
+         ^stop-km <stop>
+         ^slow-speed <v>)
+    (<fd> ^distance-to-target { <= <slow> > <stop> })
+-->
+    (<s> ^target-airspeed <v>)
+}
+
+sp {flight*elaborate*target-airspeed*stop
+    (state <s> ^landing decelerate
+               ^params.stop-km <stop>
+               ^io.input-link.flightdata.distance-to-target <= <stop>)
+-->
+    (<s> ^target-airspeed 0)
+}
+
+sp {flight*elaborate*speed-error
+    (state <s> ^target-airspeed <tas>
+               ^io.input-link.flightdata.airspeed <as>)
+-->
+    (<s> ^speed-error (- <tas> <as>))
+}
+
+# Too slow: more pusher.
+sp {flight*propose*adjust-pusher*up
+    (state <s> ^params.speed-deadband <db>
+               ^speed-error { <e> > <db> }
+               ^io.output-link.pusher-throttle { <pt> < 1.0 })
+-->
+    (<s> ^operator <o> + =)
+    (<o> ^name adjust-pusher
+         ^pusher <pt>
+         ^error <e>)
+}
+
+# Too fast: less pusher.
+sp {flight*propose*adjust-pusher*down
+    (state <s> ^params.neg-speed-deadband <ndb>
+               ^speed-error { <e> < <ndb> }
+               ^io.output-link.pusher-throttle { <pt> > 0.0 })
+-->
+    (<s> ^operator <o> + =)
+    (<o> ^name adjust-pusher
+         ^pusher <pt>
+         ^error <e>)
+}
+
+# Testing ^pusher <pt> from the operator stops this re-firing on its own result.
+sp {flight*apply*adjust-pusher
+    (state <s> ^operator <o>
+               ^params.pusher-gain <k>
+               ^io.output-link <out>)
+    (<o> ^name adjust-pusher
+         ^pusher <pt>
+         ^error <e>)
+    (<out> ^pusher-throttle <pt>)
+-->
+    (<out> ^pusher-throttle <pt> - (+ <pt> (* <k> <e>)) +)
+}
+
+##############################################
+### PITCH CONTROL - while decelerating, the lift throttle keeps the nose at
+### decel-pitch. With the lift rotors left at cruise power there is more lift
+### than needed, so the AP (holding altitude) flies nose-down, which tilts the
+### lift rotors forward and keeps the aircraft at cruise speed. Less lift
+### makes the AP raise the nose (rotor thrust upward, more wing drag); more
+### lift takes over as the wing slows and needs a higher nose to hold altitude.
+##############################################
+sp {flight*elaborate*pitch-error
+    (state <s> ^landing decelerate
+               ^params.decel-pitch <tp>
+               ^io.input-link.flightdata.pitch <p>)
+-->
+    (<s> ^pitch-error (- <p> <tp>))
+}
+
+# Nose higher than the target: the wing needs help, more lift. Not while
+# already climbing: at low speed the AP's nose-up doesn't mean the wing needs
+# help, and adding lift then is what climbs the aircraft at takeoff power.
+sp {flight*propose*adjust-lift-pitch*up
+    (state <s> ^params <p>
+               ^pitch-error { <e> > <db> }
+               ^io <io>)
+    (<p> ^pitch-deadband <db>
+         ^max-decel-vs <mvs>)
+    (<io> ^input-link.flightdata.vertical-speed < <mvs>
+          ^output-link.throttle { <t> < 1.0 })
+-->
+    (<s> ^operator <o> + =)
+    (<o> ^name adjust-lift-pitch
+         ^throttle <t>
+         ^error <e>)
+}
+
+# Nose lower than the target: too much lift, less lift (not below min-decel-lift).
+sp {flight*propose*adjust-lift-pitch*down
+    (state <s> ^params <p>
+               ^pitch-error { <e> < <ndb> }
+               ^io.output-link.throttle { <t> > <min> })
+    (<p> ^neg-pitch-deadband <ndb>
+         ^min-decel-lift <min>)
+-->
+    (<s> ^operator <o> + =)
+    (<o> ^name adjust-lift-pitch
+         ^throttle <t>
+         ^error <e>)
+}
+
+sp {flight*apply*adjust-lift-pitch
+    (state <s> ^operator <o>
+               ^params.lift-pitch-gain <k>
+               ^io.output-link <out>)
+    (<o> ^name adjust-lift-pitch
+         ^throttle <t>
+         ^error <e>)
+    (<out> ^throttle <t>)
+-->
+    (<out> ^throttle <t> - (+ <t> (* <k> <e>)) +)
+}
+
+# Climbing while slowing down: take lift away (not below min-decel-lift),
+# whatever the pitch. Reuses LIFT CONTROL's adjust-lift step.
+sp {flight*propose*adjust-lift*decel-climbing
+    (state <s> ^landing decelerate
+               ^params <p>
+               ^io <io>)
+    (<p> ^max-decel-vs <mvs>
+         ^min-decel-lift <min>
+         ^neg-lift-step <step>)
+    (<io> ^input-link.flightdata.vertical-speed > <mvs>
+          ^output-link.throttle { <t> > <min> })
+-->
+    (<s> ^operator <o> + =)
+    (<o> ^name adjust-lift
+         ^throttle <t>
+         ^step <step>)
+}
+
+##############################################
+### VERTICAL DESCENT - the reverse of takeoff. Once stopped over the ground:
+### AP off, pusher off, back to vertical mode, lift rotors to descent-throttle,
+### then LIFT CONTROL holds a steady descent rate down to the ground.
+### "Stopped" uses ground speed, not airspeed: with wind, a stopped aircraft
+### still shows airspeed, and waiting for low airspeed left it hovering with
+### the AP raising the nose until it climbed. If it stops short of the
+### target, it descends where it stopped.
+##############################################
+sp {flight*propose*start-vertical-descent
+    (state <s> ^landing decelerate
+               ^params.stopped-groundspeed <sgs>
+               ^io.input-link.flightdata.groundspeed <= <sgs>)
+-->
+    (<s> ^operator <o> + >)
+    (<o> ^name start-vertical-descent)
+}
+
+# Also once the wing has stopped flying: hovering in wind, airspeed reaches 0
+# while ground speed stays near the wind speed, and with the AP still on the
+# aircraft would hang there and climb instead of coming down.
+sp {flight*propose*start-vertical-descent*airspeed
+    (state <s> ^landing decelerate
+               ^params.stopped-airspeed <sas>
+               ^io.input-link.flightdata.airspeed <= <sas>)
+-->
+    (<s> ^operator <o> + >)
+    (<o> ^name start-vertical-descent)
+}
+
+# Both triggers at once: either is fine.
+sp {flight*compare*start-vertical-descent
+    (state <s> ^operator <o1> +
+               ^operator { <o2> <> <o1> } +)
+    (<o1> ^name start-vertical-descent)
+    (<o2> ^name start-vertical-descent)
+-->
+    (<s> ^operator <o1> = <o2>)
+}
+
+sp {flight*apply*start-vertical-descent
+    (state <s> ^operator.name start-vertical-descent
+               ^landing decelerate
+               ^flight-mode <fm>
+               ^io.output-link <out>)
+    (<out> ^autopilot <ap>
+           ^VTOLMode <vmo>)
+-->
+    (<s> ^landing decelerate - vertical-descent +)
+    (<s> ^flight-mode <fm> - vertical +)
+    (<out> ^autopilot <ap> - off +)
+    (<out> ^VTOLMode <vmo> - vertical +)
+    (write (crlf) |Starting vertical descent|)
+}
+
+# Straight to a set lift power, like takeoff sets 1.0, instead of starting
+# from wherever PITCH CONTROL left it.
+sp {flight*apply*start-vertical-descent*throttle
+    (state <s> ^operator.name start-vertical-descent
+               ^params.descent-throttle <dt>
+               ^io.output-link <out>)
+    (<out> ^throttle { <t> <> <dt> })
+-->
+    (<out> ^throttle <t> - <dt> +)
+}
+
+sp {flight*apply*start-vertical-descent*pusher-off
+    (state <s> ^operator.name start-vertical-descent
+               ^io.output-link <out>)
+    (<out> ^pusher-throttle { <pt> <> 0.0 })
+-->
+    (<out> ^pusher-throttle <pt> - 0.0 +)
+}
+
+sp {flight*propose*touchdown
+    (state <s> ^landing vertical-descent
+               ^io.input-link.flightdata.on-ground yes)
+-->
+    (<s> ^operator <o> + >)
+    (<o> ^name touchdown)
+}
+
+sp {flight*apply*touchdown
+    (state <s> ^operator.name touchdown
+               ^landing vertical-descent)
+-->
+    (<s> ^landing vertical-descent - landed +)
+    (write (crlf) |Landed|)
+}
+
+sp {flight*apply*touchdown*cut-throttle
+    (state <s> ^operator.name touchdown
+               ^io.output-link <out>)
+    (<out> ^throttle { <t> <> 0.0 })
+-->
+    (<out> ^throttle <t> - 0.0 +)
+}
+
+##############################################
+### LIFT CONTROL - in the vertical descent, the lift throttle holds a target
+### descent rate in small fixed steps (lift-step per decision), never below
+### min-descent-lift so the rotors can always catch the aircraft.
+##############################################
+sp {flight*elaborate*lift-target-vs*high
+    (state <s> ^landing vertical-descent
+               ^params <p>
+               ^io.input-link.flightdata <fd>)
+    (<p> ^low-agl <low>
+         ^descent-vs-high <v>)
+    (<fd> ^agl > <low>)
+-->
+    (<s> ^lift-target-vs <v>)
+}
+
+sp {flight*elaborate*lift-target-vs*low
+    (state <s> ^landing vertical-descent
+               ^params <p>
+               ^io.input-link.flightdata <fd>)
+    (<p> ^low-agl <low>
+         ^descent-vs-low <v>)
+    (<fd> ^agl <= <low>)
+-->
+    (<s> ^lift-target-vs <v>)
+}
+
+sp {flight*elaborate*lift-vs-error
+    (state <s> ^lift-target-vs <tvs>
+               ^io.input-link.flightdata.vertical-speed <vs>)
+-->
+    (<s> ^lift-vs-error (- <tvs> <vs>))
+}
+
+# Sinking faster than the target: more lift.
+sp {flight*propose*adjust-lift*up
+    (state <s> ^params <p>
+               ^lift-vs-error { <e> > <db> }
+               ^io.output-link.throttle { <t> < 1.0 })
+    (<p> ^vs-deadband <db>
+         ^lift-step <step>)
+-->
+    (<s> ^operator <o> + =)
+    (<o> ^name adjust-lift
+         ^throttle <t>
+         ^step <step>)
+}
+
+# Sinking slower than the target (or climbing): less lift, not below min-descent-lift.
+sp {flight*propose*adjust-lift*down
+    (state <s> ^params <p>
+               ^lift-vs-error { <e> < <ndb> }
+               ^io.output-link.throttle { <t> > <min> })
+    (<p> ^neg-vs-deadband <ndb>
+         ^min-descent-lift <min>
+         ^neg-lift-step <step>)
+-->
+    (<s> ^operator <o> + =)
+    (<o> ^name adjust-lift
+         ^throttle <t>
+         ^step <step>)
+}
+
+# Testing ^throttle <t> from the operator stops this re-firing on its own result.
+sp {flight*apply*adjust-lift
+    (state <s> ^operator <o>
+               ^io.output-link <out>)
+    (<o> ^name adjust-lift
+         ^throttle <t>
+         ^step <step>)
+    (<out> ^throttle <t>)
+-->
+    (<out> ^throttle <t> - (+ <t> <step>) +)
+}
+
+##############################################
+### ABORT - extra actions for the existing abort-landing operator: AP off
+### and pusher off so the 0.9 lift throttle climbs straight up.
+##############################################
+sp {apply*abort-landing*autopilot-off
+    (state <s> ^operator.name abort-landing
+               ^io.output-link <out>)
+    (<out> ^autopilot { <ap> <> off })
+-->
+    (<out> ^autopilot <ap> - off +)
+}
+
+sp {apply*abort-landing*pusher-off
+    (state <s> ^operator.name abort-landing
+               ^io.output-link <out>)
+    (<out> ^pusher-throttle { <pt> <> 0.0 })
+-->
+    (<out> ^pusher-throttle <pt> - 0.0 +)
+}
+
+# Clear the VS command so the go-around's begin-cruise sends it again (Java
+# only acts on a changed value, and the AP modes are lost when AP goes off).
+sp {apply*abort-landing*clear-target-vs
+    (state <s> ^operator.name abort-landing
+               ^io.output-link <out>)
+    (<out> ^target-vs { <tvs> <> none })
+-->
+    (<out> ^target-vs <tvs> - none +)
+}

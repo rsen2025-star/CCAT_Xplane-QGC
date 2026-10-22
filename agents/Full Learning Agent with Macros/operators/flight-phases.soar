@@ -182,6 +182,7 @@ sp {apply*begin-cruise*end-go-around
 ##############################################
 sp {flight*propose*follow-bearing
     (state <s> ^flight-mode horizontal
+              -^capabilities.navigation lost
                ^params.stop-km <km>
                ^io <io>)
     (<io> ^input-link.flightdata <fd>
@@ -220,6 +221,8 @@ sp {flight*apply*follow-bearing
 sp {flight*propose*begin-landing
     (state <s> ^flight-mode horizontal
                ^landing no
+              -^maintain-wing-borne yes
+              -^capabilities.navigation lost
                ^params.land-at-target-km <km>
                ^io.input-link.flightdata.distance-to-target <= <km>)
 -->
@@ -243,6 +246,7 @@ sp {flight*apply*begin-landing
 ##############################################
 sp {flight*elaborate*target-airspeed*approach
     (state <s> ^landing decelerate
+              -^emergency-land yes
                ^params <p>
                ^io.input-link.flightdata <fd>)
     (<p> ^slow-km <slow>
@@ -254,6 +258,7 @@ sp {flight*elaborate*target-airspeed*approach
 
 sp {flight*elaborate*target-airspeed*slow
     (state <s> ^landing decelerate
+              -^emergency-land yes
                ^params <p>
                ^io.input-link.flightdata <fd>)
     (<p> ^slow-km <slow>
@@ -266,6 +271,7 @@ sp {flight*elaborate*target-airspeed*slow
 
 sp {flight*elaborate*target-airspeed*stop
     (state <s> ^landing decelerate
+              -^emergency-land yes
                ^params.stop-km <stop>
                ^io.input-link.flightdata.distance-to-target <= <stop>)
 -->
@@ -281,9 +287,10 @@ sp {flight*elaborate*speed-error
 
 # Too slow: more pusher.
 sp {flight*propose*adjust-pusher*up
-    (state <s> ^params.speed-deadband <db>
-               ^speed-error { <e> > <db> }
-               ^io.output-link.pusher-throttle { <pt> < 1.0 })
+    (state <s> -^capabilities.pusher failed
+                ^params.speed-deadband <db>
+                ^speed-error { <e> > <db> }
+                ^io.output-link.pusher-throttle { <pt> < 1.0 })
 -->
     (<s> ^operator <o> + =)
     (<o> ^name adjust-pusher
@@ -405,6 +412,7 @@ sp {flight*propose*adjust-lift*decel-climbing
 ##############################################
 sp {flight*propose*start-vertical-descent
     (state <s> ^landing decelerate
+              -^maintain-wing-borne yes
                ^params.stopped-groundspeed <sgs>
                ^io.input-link.flightdata.groundspeed <= <sgs>)
 -->
@@ -417,6 +425,7 @@ sp {flight*propose*start-vertical-descent
 # aircraft would hang there and climb instead of coming down.
 sp {flight*propose*start-vertical-descent*airspeed
     (state <s> ^landing decelerate
+              -^maintain-wing-borne yes
                ^params.stopped-airspeed <sas>
                ^io.input-link.flightdata.airspeed <= <sas>)
 -->
@@ -499,6 +508,7 @@ sp {flight*apply*touchdown*cut-throttle
 ##############################################
 sp {flight*elaborate*lift-target-vs*high
     (state <s> ^landing vertical-descent
+              -^cautious-descent yes
                ^params <p>
                ^io.input-link.flightdata <fd>)
     (<p> ^low-agl <low>
@@ -510,6 +520,7 @@ sp {flight*elaborate*lift-target-vs*high
 
 sp {flight*elaborate*lift-target-vs*low
     (state <s> ^landing vertical-descent
+              -^cautious-descent yes
                ^params <p>
                ^io.input-link.flightdata <fd>)
     (<p> ^low-agl <low>

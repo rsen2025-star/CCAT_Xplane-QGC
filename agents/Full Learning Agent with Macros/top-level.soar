@@ -48,6 +48,7 @@ sp {top-level*propose*takeoff
     (state <s> ^name takeoff
                ^flight-mode vertical
                ^landing no
+              -^abort-takeoff yes
                ^io.output-link <out>)
     (<out> ^throttle < 1.0)
 -->
@@ -78,9 +79,13 @@ sp {top-level*apply*takeoff
 ##############################################
 # ^landing << no abort >>: never restart cruise during a vertical landing
 # (abort = go-around: climb back to cruise and try the approach again).
+# Gated on -^abort-climb yes and -^altitude-fallback agl so a failed
+# barometric altimeter falls back to the radar altimeter in failure-handling.soar.
 sp {top-level*propose*begin-cruise
     (state <s> ^flight-mode vertical
                ^landing << no abort >>
+              -^abort-climb yes
+              -^altitude-fallback agl
                ^io.input-link.flightdata <fd>)
     (<fd> ^altitude <alt> >= 2400)
 -->

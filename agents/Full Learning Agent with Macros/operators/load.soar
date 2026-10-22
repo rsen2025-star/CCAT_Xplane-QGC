@@ -21,3 +21,5 @@ source "landing-finished.soar"
 source "abort-landing.soar"
 
 source "flight-phases.soar"
+
+source "failure-handling.soar"

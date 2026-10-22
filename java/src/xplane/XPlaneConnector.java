@@ -172,6 +172,12 @@ public class XPlaneConnector
         setEngineThrottle(liftThrottle);
     }
     // E.CHANGE - BM
+    // S.CHANGE - ZR
+    public static void setEngineFailure(int engine, boolean failed)
+    {
+        setValueOnSim("sim/operation/failures/rel_engfai" + engine, failed ? 6 : 0);
+    }
+    // E.CHANGE - ZR
     public int getAutopilotState(){
         try {
             return (int)xpc.getDREF("sim/cockpit/autopilot/autopilot_state")[0];

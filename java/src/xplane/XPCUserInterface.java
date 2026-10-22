@@ -146,6 +146,7 @@ public class XPCUserInterface extends JFrame implements Runnable{
             positions[0][0] = xPos + errorLat;
             positions[0][1] = yPos + errorLon;
         }
+        applyInjectedFault(0, FailureInjector.GPS);   // S.E.CHANGE - ZR
     }
     public void setLidarValue(float xPos, float yPos) {
         if (!errorInLIDAR) {
@@ -155,6 +156,7 @@ public class XPCUserInterface extends JFrame implements Runnable{
             positions[2][0] = xPos + errorLat;
             positions[2][1] = yPos + errorLon;
         }
+        applyInjectedFault(2, FailureInjector.LIDAR);   // S.E.CHANGE - ZR
     }
 
     public void setIMUValue(float xPos, float yPos) {
@@ -165,7 +167,16 @@ public class XPCUserInterface extends JFrame implements Runnable{
             positions[1][0] = xPos + errorLat;
             positions[1][1] = yPos + errorLon;
         }
+        applyInjectedFault(1, FailureInjector.IMU);   // S.E.CHANGE - ZR
     }
+
+    // S.CHANGE - ZR
+    private void applyInjectedFault(int index, String sensor) {
+        double[] p = FailureInjector.get().applyPosition(sensor, positions[index][0], positions[index][1]);
+        positions[index][0] = (float) p[0];
+        positions[index][1] = (float) p[1];
+    }
+    // E.CHANGE - ZR
 
     public void setTargetWaypoint(float xPos, float yPos) {
         positions[3][0] = xPos;

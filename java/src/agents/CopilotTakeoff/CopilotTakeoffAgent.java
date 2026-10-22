@@ -18,6 +18,8 @@ import xplane.SensorChangeLearningOptionDisplay;
 import xplane.WaypointController;
 import xplane.XPCUserInterface;
 import xplane.XPlaneConnector;
+import xplane.FailureInjector; // S.E.CHANGE - ZR
+import xplane.FailurePanel; // S.E.CHANGE - ZR
 
 import java.io.*;
 import java.util.Iterator;
@@ -134,6 +136,11 @@ public class CopilotTakeoffAgent extends XPlaneAgent
             e.printStackTrace();
         }
         waypoints = new WaypointController();
+        // S.CHANGE - ZR
+        FailureInjector.get().clearAll();   // X-Plane keeps failures across restarts
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> FailureInjector.get().clearAll()));
+        FailurePanel.open();
+        // E.CHANGE - ZR
         // S.CHANGE - BM
         // Seed the sensors with the X-Plane start position so the first cycle isn't at 0,0
         FlightData startData = getFlightData();
@@ -192,7 +199,22 @@ public class CopilotTakeoffAgent extends XPlaneAgent
                 add("change-sensor-auth", "false").markWme("change-sensor-auth").
                 add("gps-reliable", "true").markWme("gps-reliable").
                 add("imu-reliable", "true").markWme("imu-reliable").
-                add("lidar-reliable", "true").markWme("lidar-reliable");
+                add("lidar-reliable", "true").markWme("lidar-reliable").
+                // S.CHANGE - ZR
+                push("failures").
+                add("active-count", 0).markWme("f-count").
+                add("last-injected", "none").markWme("f-last").
+                add("engine-0", "ok").markWme("f-engine-0").
+                add("engine-1", "ok").markWme("f-engine-1").
+                add("engine-2", "ok").markWme("f-engine-2").
+                add("engine-3", "ok").markWme("f-engine-3").
+                add("engine-4", "ok").markWme("f-engine-4").
+                add("gps", "ok").markWme("f-gps").
+                add("imu", "ok").markWme("f-imu").
+                add("lidar", "ok").markWme("f-lidar").
+                add("altimeter", "ok").markWme("f-altimeter").
+                add("radar-altimeter", "ok").markWme("f-radar-altimeter");
+                // E.CHANGE - ZR
         try {
 
             rlWriter = new PrintWriter("C:/Users/Brianna/Documents/CCAT_Xplane-QGC-Fresh/soar/preference_values.txt");
@@ -873,7 +895,7 @@ public class CopilotTakeoffAgent extends XPlaneAgent
                 InputWme bearingWme = builder.getWme("bearing-to-target");
                 bearingWme.update(syms.createInteger((int) Math.round(targetHeading) % 360));
                 InputWme aglWme = builder.getWme("agl");
-                aglWme.update(syms.createDouble(verticalState[0]));
+                aglWme.update(syms.createDouble(FailureInjector.get().applyValue(FailureInjector.RADAR_ALTIMETER, verticalState[0])));  // S.E.CHANGE - ZR
                 InputWme vsWme = builder.getWme("vertical-speed");
                 vsWme.update(syms.createDouble(verticalState[1]));
                 InputWme onGroundWme = builder.getWme("on-ground");
@@ -884,9 +906,9 @@ public class CopilotTakeoffAgent extends XPlaneAgent
                 groundspeedWme.update(syms.createDouble(verticalState[4]));
                 // E.CHANGE - BM
                 InputWme p = builder.getWme("alt");
-                p.update(syms.createInteger(data.altitude));
+                p.update(syms.createInteger((int) FailureInjector.get().applyValue(FailureInjector.ALTIMETER, data.altitude)));  // S.E.CHANGE - ZR
                 InputWme e = builder.getWme("engOK");
-                e.update(syms.createString(Boolean.toString(data.allEningesOK)));
+                e.update(syms.createString(Boolean.toString(data.allEningesOK && FailureInjector.get().allEnginesOk())));  // S.E.CHANGE - ZR
                 InputWme wb = builder.getWme("wBrakes");
                 wb.update(syms.createString(Boolean.toString(data.wheelBrakesON)));
                 InputWme ab = builder.getWme("aBrakes");
@@ -895,6 +917,7 @@ public class CopilotTakeoffAgent extends XPlaneAgent
                 re.update(syms.createString(Boolean.toString(data.reversersON)));
 //                InputWme alertAccepted = builder.getWme("sensor-alert-accepted");
 //                alertAccepted.update(syms.createString(UIobj.pilotDecision));
+                updateFailureWmes();  // S.E.CHANGE - ZR
                 // temp
                 // uncomment if you want to see the productions that matches
                 MatchSet matchSet = sagt.getMatchSet();
@@ -929,6 +952,17 @@ public class CopilotTakeoffAgent extends XPlaneAgent
         return previous == null || previous != wme.getTimetag();
     }
     // E.CHANGE - BM
+    // S.CHANGE - ZR
+    private void updateFailureWmes()
+    {
+        FailureInjector fi = FailureInjector.get();
+        builder.getWme("f-count").update(syms.createInteger(fi.activeCount()));
+        builder.getWme("f-last").update(syms.createString(fi.lastInjected()));
+        for (String target : FailureInjector.ALL_TARGETS) {
+            builder.getWme("f-" + target).update(syms.createString(fi.mode(target).toString()));
+        }
+    }
+    // E.CHANGE - ZR
     private void printWme(Wme wme)
     {
         System.out.println(wme);

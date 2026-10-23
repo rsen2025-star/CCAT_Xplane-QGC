@@ -79,6 +79,7 @@ public class CopilotTakeoffAgent extends XPlaneAgent
     private java.lang.String realTime;
     private PipedReader filterOutput;
     private XPCUserInterface UIobj;
+    private xplane.FailureResponseHandler failureResponses;
     private WaypointController waypoints;
     private XPlaneConnector xpcobj;
     private VotingLogic votingobj;
@@ -129,6 +130,7 @@ public class CopilotTakeoffAgent extends XPlaneAgent
 
         //sagt.getEvents().addListener(FlightData.class, new CopilotEventListener(syms, builder, sagt, 100));
         UIobj = new XPCUserInterface();
+        failureResponses = new xplane.FailureResponseHandler(UIobj);
         try {
             Thread thread_UI = new Thread(UIobj);
             thread_UI.start();
@@ -288,6 +290,13 @@ public class CopilotTakeoffAgent extends XPlaneAgent
             Wme nextWME = wmes.next();
             printWme(nextWME);
             //System.err.println(nextWME.getAttribute().asString().getValue());
+
+            if (nextWME.getAttribute().asString().getValue().equals("failure-response"))
+            {
+                failureResponses.onFailureResponse(nextWME.getValue().toString());
+                continue;
+            }
+            
             if (nextWME.getAttribute().asString().getValue().equals("throttle"))
             {
                 //System.err.println("HELLO");

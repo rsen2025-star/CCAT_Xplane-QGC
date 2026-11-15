@@ -58,6 +58,15 @@ echo "\nLoading flight-phases.soar"
 ###   vs-deadband                fpm: ignore smaller vertical speed errors
 ###   lift-step                  lift throttle change per decision in the descent
 ###   min-descent-lift           lift throttle never goes below this in the descent
+###   wing-borne-speed           kt: in cruise at/above this, step the lift rotors
+###                              down so the wing carries the aircraft
+###   min-wing-speed             kt: in cruise below this, step lift back up
+###   cruise-lift                lift throttle begin-cruise sets (top-level.soar);
+###                              cruise never steps lift back above it
+###   max-cruise-sink            fpm: sinking faster than this, stop taking lift away
+###   cruise-shed-step           lift throttle change per decision when shedding in
+###                              cruise; smaller than lift-step so the AP can raise
+###                              the nose as the rotors unload
 ##############################################
 sp {apply*initialize*flight-phases
     (state <s> ^operator.name initialize
@@ -92,7 +101,12 @@ sp {apply*initialize*flight-phases
          ^neg-vs-deadband -100
          ^lift-step 0.02
          ^neg-lift-step -0.02
-         ^min-descent-lift 0.2)
+         ^min-descent-lift 0.2
+         ^wing-borne-speed 30
+         ^min-wing-speed 25
+         ^cruise-lift 0.6
+         ^max-cruise-sink -100
+         ^cruise-shed-step -0.005)
     (<out> ^pusher-throttle -1.0
            ^autopilot off
            ^target-heading none
@@ -172,6 +186,64 @@ sp {apply*begin-cruise*end-go-around
                ^landing abort)
 -->
     (<s> ^landing abort - no +)
+}
+
+##############################################
+### CRUISE LIFT - begin-cruise leaves the lift rotors at cruise-lift. As the
+### pusher speeds the aircraft up the wing adds lift on top of the rotors and
+### the aircraft climbs. Once at wing-borne-speed, step the rotors down
+### (lift-step per decision, like LIFT CONTROL) so the wing takes over; if
+### airspeed falls below min-wing-speed, step them back up. Only with no
+### failures: the failure responses set the lift throttle themselves.
+### Reuses LIFT CONTROL's adjust-lift apply rule.
+##############################################
+sp {flight*propose*adjust-lift*cruise-shed
+    (state <s> ^flight-mode horizontal
+               ^landing no
+               ^failure-response nominal
+               ^params <p>
+               ^io <io>)
+    (<p> ^wing-borne-speed <wbs>
+         ^max-cruise-sink <sink>
+         ^cruise-shed-step <step>)
+    (<io> ^input-link.flightdata <fd>
+          ^output-link.throttle { <t> > 0.0 })
+    (<fd> ^airspeed >= <wbs>
+          ^vertical-speed > <sink>)
+-->
+    (<s> ^operator <o> + =)
+    (<o> ^name adjust-lift
+         ^throttle <t>
+         ^step <step>)
+}
+
+sp {flight*propose*adjust-lift*cruise-restore
+    (state <s> ^flight-mode horizontal
+               ^landing no
+               ^failure-response nominal
+               ^params <p>
+               ^io <io>)
+    (<p> ^min-wing-speed <mws>
+         ^cruise-lift <cl>
+         ^lift-step <step>)
+    (<io> ^input-link.flightdata.airspeed < <mws>
+          ^output-link.throttle { <t> < <cl> })
+-->
+    (<s> ^operator <o> + =)
+    (<o> ^name adjust-lift
+         ^throttle <t>
+         ^step <step>)
+}
+
+# PITCH CONTROL assumes the rotors start the deceleration at or above
+# min-decel-lift; with lift shed in cruise, bring them back up to it.
+sp {apply*begin-landing*restore-lift
+    (state <s> ^operator.name begin-landing
+               ^params.min-decel-lift <min>
+               ^io.output-link <out>)
+    (<out> ^throttle { <t> < <min> })
+-->
+    (<out> ^throttle <t> - <min> +)
 }
 
 ##############################################

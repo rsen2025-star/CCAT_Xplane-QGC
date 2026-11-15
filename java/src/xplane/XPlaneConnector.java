@@ -242,8 +242,10 @@ public class XPlaneConnector
         }
     }
 
-    // Same as pressing VS on the Garmin and dialing in fpm: the AP climbs/descends toward the
-    // selected altitude (setTargetAltitude), captures it and switches to ALT hold by itself.
+    // S.CHANGE - BM
+    // Same as pressing VS on the Garmin and dialing in fpm, plus arming altitude capture (ALTS):
+    // the AP climbs/descends toward the selected altitude (setTargetAltitude), captures it and
+    // switches to ALT hold by itself.
     public void setVerticalSpeed(float fpm){
         try {
             // VS is a toggle, so only press it when VS isn't already active (0 = off, 1 = armed, 2 = active)
@@ -253,10 +255,17 @@ public class XPlaneConnector
                 Thread.sleep(300);
             }
             xpc.sendDREF("sim/cockpit2/autopilot/vvi_dial_fpm", fpm);
-        } catch (IOException | InterruptedException e) {
+            // The AP only captures the selected altitude if altitude capture (ALTS) is armed;
+            // without it VS climbs/descends forever. Arm is a toggle, so only press it when off
+            // (0 = off, 1 = armed, 2 = captured)
+            if (xpc.getDREF("sim/cockpit2/autopilot/altitude_hold_status")[0] == 0) {
+                sendCommand("sim/autopilot/altitude_arm");
+            }
+        } catch (IOException | InterruptedException | IndexOutOfBoundsException e) {
             failConcisely(e, "setVerticalSpeed");
         }
     }
+    // E.CHANGE - BM
 
     // Height above ground (ft), vertical speed (fpm), on ground (1 = yes), pitch (deg, nose up +), ground speed (kt)
     public float[] getVerticalState(){

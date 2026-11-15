@@ -16,6 +16,9 @@ import org.jsoar.util.commands.SoarCommands;
 import util.VotingLogic;
 import xplane.SensorChangeLearningOptionDisplay;
 import xplane.WaypointController;
+import xplane.FlightPlan; // S.E.CHANGE - BM
+import xplane.FlightPlanPanel; // S.E.CHANGE - BM
+import xplane.RoutePlanner; // S.E.CHANGE - BM
 import xplane.XPCUserInterface;
 import xplane.XPlaneConnector;
 import xplane.FailureInjector; // S.E.CHANGE - ZR
@@ -43,12 +46,31 @@ public class CopilotTakeoffAgent extends XPlaneAgent
     boolean CHANGE_SENSOR_AUTHORITY = false; //default pilot's choice for changing sensor
     // S.CHANGE - BM
     /*
-        Destination the aircraft flies to after takeoff (decimal degrees)
-        The start position is wherever the aircraft is placed in X-Plane
+        Fallback destination (decimal degrees), only used if the route can't be generated
         Current dest: KMCO (Was testing KORL --> KMCO)
     */
     static final double DESTINATION_LAT = 28.4289;
     static final double DESTINATION_LON = -81.3089;
+    /*
+        Flight plan: the departure is wherever the aircraft is placed in X-Plane (shown as the
+        nearest airport within DEPARTURE_AIRPORT_KM, else its coordinates). The destination is
+        typed into the Flight Plan window (Plan route); the route is generated with X-Plane's
+        navigation database (RoutePlanner). The agent holds its takeoff until a destination is
+        planned, and the route locks once takeoff is finished.
+    */
+    static final double DEPARTURE_AIRPORT_KM = 3.0;
+    static final String XPLANE_ROOT = "C:\\X-Plane 12";
+    /*
+        Fallback if the route can't be generated (navdata or airport not found): these
+        hard-coded waypoints {lat, lon} and DESTINATION_LAT/LON above (KORL -> dogleg -> KMCO).
+        Keep the first one a few km from departure (cruise starts after the vertical climb)
+        and the last one more than 3.5 km (the agent's land-at-target-km) from the destination.
+    */
+    static final double[][] ROUTE = {
+            {28.52, -81.26},
+            {28.47, -81.25},
+    };
+    private FlightPlan flightPlan;
     // Land button: the target is moved this far ahead so the agent flies its normal approach
     // onto it. Must be inside the agent's land-at-target-km (3.5) and beyond slow-km (2.0).
     static final double LAND_HERE_KM = 3.0;
@@ -146,7 +168,20 @@ public class CopilotTakeoffAgent extends XPlaneAgent
         // S.CHANGE - BM
         // Seed the sensors with the X-Plane start position so the first cycle isn't at 0,0
         FlightData startData = getFlightData();
-        waypoints.setDestination(DESTINATION_LAT, DESTINATION_LON);
+        try {
+            // Departure = the aircraft's X-Plane start position
+            RoutePlanner planner = new RoutePlanner(XPLANE_ROOT);
+            double[] start = {startData.lat, startData.lon};
+            String departure = planner.nearestAirport(start[0], start[1], DEPARTURE_AIRPORT_KM);
+            if (departure == null) departure = String.format("%.4f, %.4f", start[0], start[1]);
+            flightPlan = new FlightPlan(departure, start);   // destination comes from the window
+        } catch (Exception e) {
+            System.err.println("[RoutePlanner] Could not generate a route (" + e.getMessage()
+                    + "); using the hard-coded ROUTE");
+            flightPlan = new FlightPlan("KORL", "KMCO", ROUTE, DESTINATION_LAT, DESTINATION_LON);
+        }
+        flightPlan.start(waypoints);
+        FlightPlanPanel.open(flightPlan, XPLANE_ROOT);
         UIobj.setGPSValue((float) startData.lat, (float) startData.lon);
         UIobj.setIMUValue((float) startData.lat, (float) startData.lon);
         UIobj.setLidarValue((float) startData.lat, (float) startData.lon);
@@ -395,12 +430,16 @@ public class CopilotTakeoffAgent extends XPlaneAgent
                             + " (distance to target " + String.format("%.2f", UIobj.distanceToTarget) + " km)");
                 }
                 UIobj.agentLanding = !phase.equals("no") && !phase.equals("abort") && !phase.equals("landed");
+                // Landed while following the plan (not a Land-button or picked landing zone landing)
+                if (phase.equals("landed") && !landHereTargetSet && waypoints.currentWaypoint == 3) {
+                    flightPlan.markDestinationReached();  // S.E.CHANGE - BM
+                }
                 if (phase.equals("abort")) {
                     // Abort received: clear the Land request so the go-around doesn't land again
                     UIobj.initiateLanding = false;
                     if (landHereTargetSet) {
-                        // Go back to the real destination after a Land-button landing
-                        waypoints.setDestination(DESTINATION_LAT, DESTINATION_LON);
+                        // Go back to the route (current leg) after a Land-button landing
+                        flightPlan.start(waypoints);
                         landHereTargetSet = false;
                     }
                 } else if (phase.equals("no") && UIobj.abortLanding) {
@@ -549,6 +588,7 @@ public class CopilotTakeoffAgent extends XPlaneAgent
                 }else if(txt.equalsIgnoreCase("horizontal")){
                     xpcobj.setVTOLModeHorizontal();
                     UIobj.finishedTakeoff=true;
+                    flightPlan.markDeparted();  // S.E.CHANGE - BM
                     if(xpcobj.getAutopilotState() == 164)
                         xpcobj.setAutopilot(162);
                 }else{
@@ -828,11 +868,24 @@ public class CopilotTakeoffAgent extends XPlaneAgent
                 }
                 // E.CHANGE - BM
 
+                // S.CHANGE - BM
+                // Following the flight plan unless the pilot pressed Land or picked a landing zone
+                boolean followingPlan = !landHereTargetSet && waypoints.currentWaypoint == 3;
+                if (followingPlan) {
+                    flightPlan.update(latitude, longitude, waypoints);
+                }
+                // E.CHANGE - BM
                 //calculate heading to target waypoint
                 waypoints.updateWaypoints(latitude,longitude);
                 targetHeading = waypoints.calculateHeading(latitude,longitude);
                 UIobj.setTargetWaypoint((float)waypoints.waypoints[waypoints.currentWaypoint].getLat(),(float)waypoints.waypoints[waypoints.currentWaypoint].getLon());
-                UIobj.setDistanceToTarget(waypoints.getDistanceToWaypoint(latitude,longitude));
+                // S.CHANGE - BM
+                // On the plan, distance-to-target is the rest of the route so the agent only starts
+                // its approach near the destination, not at each intermediate waypoint
+                UIobj.setDistanceToTarget(followingPlan
+                        ? flightPlan.remainingKm(latitude, longitude, waypoints)
+                        : waypoints.getDistanceToWaypoint(latitude,longitude));
+                // E.CHANGE - BM
 
                 UIobj.planeAirspeed = data.airspeed;
                 UIobj.planeAltitude = data.altitude;
@@ -938,7 +991,12 @@ public class CopilotTakeoffAgent extends XPlaneAgent
                     }
                 }
 
-                sagt.runFor(1, RunType.DECISIONS);
+                // S.CHANGE - BM
+                // Hold the agent (no takeoff) until a destination is planned in the Flight Plan window
+                if (flightPlan.hasRoute()) {
+                    sagt.runFor(1, RunType.DECISIONS);
+                }
+                // E.CHANGE - BM
 
             }catch(Exception e){
                 e.printStackTrace();

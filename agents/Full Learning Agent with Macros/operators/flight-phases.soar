@@ -249,9 +249,13 @@ sp {apply*begin-landing*restore-lift
 ##############################################
 ### NAVIGATION - steer the AP toward the target whenever the bearing changes
 ### by a degree. Not within stop-km: right over the target the bearing swings
-### around and steering would start a circle. Worst preference so it never
-### blocks other operators.
+### around and steering would start a circle.
 ##############################################
+# S.CHANGE - ZR
+# Best (>) preference, was worst (<): this is only proposed when the bearing
+# changed and clears itself once applied. As worst it was starved by the
+# cruise lift-shedding operator (proposed nearly every decision), so the heading
+# bug was not set and the aircraft flew circles until the shedding finished.
 sp {flight*propose*follow-bearing
     (state <s> ^flight-mode horizontal
               -^capabilities.navigation lost
@@ -262,11 +266,12 @@ sp {flight*propose*follow-bearing
     (<fd> ^bearing-to-target <b>
           ^distance-to-target > <km>)
 -->
-    (<s> ^operator <o> + <)
+    (<s> ^operator <o> + >)
     (<o> ^name follow-bearing
          ^bearing <b>
          ^old-heading <h>)
 }
+# E.CHANGE - ZR
 
 sp {flight*apply*follow-bearing
     (state <s> ^operator <o>

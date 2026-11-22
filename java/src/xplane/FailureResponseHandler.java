@@ -51,6 +51,7 @@ public class FailureResponseHandler
     });
     private ScheduledFuture<?> pending;
     private String current = "";
+    private volatile String phase = "";
     private PrintWriter csv;
 
     private static class Check
@@ -78,6 +79,20 @@ public class FailureResponseHandler
         {
             System.err.println("[FailureResponse] could not open " + LOG_FILE + ": " + e.getMessage());
         }
+    }
+
+    /** Response most recently announced by the agent (empty before the first one). */
+    public synchronized String currentResponse() { return current; }
+
+    /** Called from the output-link handler with the agent's flight phase (no, decelerate, landed, ...). */
+    public void onFlightPhase(String phase) { this.phase = phase; }
+
+    public boolean landed() { return phase.equals("landed"); }
+
+    /** Writes one result line (console + CSV) under the current response; used by FailureScenario. */
+    public void record(String check, String expected, String actual, String result)
+    {
+        log(current.isEmpty() ? "(none)" : current, check, expected, actual, result);
     }
 
     /** Called from the output-link handler whenever ^failure-response is seen. */

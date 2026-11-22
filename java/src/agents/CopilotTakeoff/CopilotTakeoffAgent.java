@@ -23,6 +23,7 @@ import xplane.XPCUserInterface;
 import xplane.XPlaneConnector;
 import xplane.FailureInjector; // S.E.CHANGE - ZR
 import xplane.FailurePanel; // S.E.CHANGE - ZR
+import xplane.FailureScenario; // S.E.CHANGE - M3
 
 import java.io.*;
 import java.util.Iterator;
@@ -102,6 +103,7 @@ public class CopilotTakeoffAgent extends XPlaneAgent
     private PipedReader filterOutput;
     private XPCUserInterface UIobj;
     private xplane.FailureResponseHandler failureResponses;
+    private FailureScenario failureScenario;   // S.E.CHANGE - M3: scripted failures (-Dfailure.scenario=...)
     private WaypointController waypoints;
     private XPlaneConnector xpcobj;
     private VotingLogic votingobj;
@@ -153,6 +155,7 @@ public class CopilotTakeoffAgent extends XPlaneAgent
         //sagt.getEvents().addListener(FlightData.class, new CopilotEventListener(syms, builder, sagt, 100));
         UIobj = new XPCUserInterface();
         failureResponses = new xplane.FailureResponseHandler(UIobj);
+        failureScenario = FailureScenario.fromProperty(failureResponses);   // S.E.CHANGE - M3
         try {
             Thread thread_UI = new Thread(UIobj);
             thread_UI.start();
@@ -424,6 +427,7 @@ public class CopilotTakeoffAgent extends XPlaneAgent
             {
                 // Mirrors the agent's ^landing phase so the UI shows Land/Abort at the right time
                 String phase = nextWME.getValue().toString();
+                failureResponses.onFlightPhase(phase);   // S.E.CHANGE - M3
                 // Log phase changes here
                 if (isNewCommand(nextWME)) {
                     System.out.println("[Agent] flight phase: " + phase
@@ -886,6 +890,11 @@ public class CopilotTakeoffAgent extends XPlaneAgent
                         ? flightPlan.remainingKm(latitude, longitude, waypoints)
                         : waypoints.getDistanceToWaypoint(latitude,longitude));
                 // E.CHANGE - BM
+                // S.CHANGE - M3
+                if (failureScenario != null && followingPlan) {
+                    failureScenario.tick(flightPlan, UIobj.distanceToTarget);
+                }
+                // E.CHANGE - M3
 
                 UIobj.planeAirspeed = data.airspeed;
                 UIobj.planeAltitude = data.altitude;

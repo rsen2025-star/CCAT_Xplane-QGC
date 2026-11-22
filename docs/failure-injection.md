@@ -1,6 +1,6 @@
 # Failure injection
 
-The small always-on-top **Failure Injection** window (opens at the top left on startup) triggers equipment and sensor failures. Each click on a button cycles that target through its modes and back to `ok`. **Clear all failures** resets everything, including failures left in X-Plane.
+The **Failure Injection** panel, on the right of the always-on-top Flight Plan & Failure Injection window (opens at the top left on startup, the flight plan is on the left), triggers equipment and sensor failures. Each click on a button cycles that target through its modes and back to `ok`. **Clear all failures** resets everything, including failures left in X-Plane.
 
 | Target | Modes | Effect |
 |---|---|---|
@@ -29,6 +29,7 @@ Injected failures are not cleared by the sensor-warning timeouts. They stay unti
 | File | Role |
 |---|---|
 | `java/src/xplane/FailureInjector.java` | Holds failure state, applies the faults, writes the engine failure DREF |
-| `java/src/xplane/FailurePanel.java` | The button window |
+| `java/src/xplane/FailurePanel.java` | The button panel |
+| `java/src/xplane/ControlWindow.java` | The window that holds this panel and the Flight Plan panel |
 | `java/src/agents/CopilotTakeoff/CopilotTakeoffAgent.java` | Publishes `^failures` and applies the altimeter overrides |
 | `java/src/xplane/XPCUserInterface.java` | Applies sensor faults to the GPS, IMU and LIDAR positions |

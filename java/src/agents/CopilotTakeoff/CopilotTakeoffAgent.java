@@ -17,12 +17,11 @@ import util.VotingLogic;
 import xplane.SensorChangeLearningOptionDisplay;
 import xplane.WaypointController;
 import xplane.FlightPlan; // S.E.CHANGE - BM
-import xplane.FlightPlanPanel; // S.E.CHANGE - BM
 import xplane.RoutePlanner; // S.E.CHANGE - BM
 import xplane.XPCUserInterface;
 import xplane.XPlaneConnector;
 import xplane.FailureInjector; // S.E.CHANGE - ZR
-import xplane.FailurePanel; // S.E.CHANGE - ZR
+import xplane.ControlWindow; // S.E.CHANGE - ZR
 
 import java.io.*;
 import java.util.Iterator;
@@ -59,7 +58,7 @@ public class CopilotTakeoffAgent extends XPlaneAgent
         planned, and the route locks once takeoff is finished.
     */
     static final double DEPARTURE_AIRPORT_KM = 3.0;
-    static final String XPLANE_ROOT = "C:\\X-Plane 12";
+    static final String XPLANE_ROOT = "D:\\SteamLibrary\\steamapps\\common\\X-Plane 12";
     /*
         Fallback if the route can't be generated (navdata or airport not found): these
         hard-coded waypoints {lat, lon} and DESTINATION_LAT/LON above (KORL -> dogleg -> KMCO).
@@ -163,7 +162,6 @@ public class CopilotTakeoffAgent extends XPlaneAgent
         // S.CHANGE - ZR
         FailureInjector.get().clearAll();   // X-Plane keeps failures across restarts
         Runtime.getRuntime().addShutdownHook(new Thread(() -> FailureInjector.get().clearAll()));
-        FailurePanel.open();
         // E.CHANGE - ZR
         // S.CHANGE - BM
         // Seed the sensors with the X-Plane start position so the first cycle isn't at 0,0
@@ -181,7 +179,7 @@ public class CopilotTakeoffAgent extends XPlaneAgent
             flightPlan = new FlightPlan("KORL", "KMCO", ROUTE, DESTINATION_LAT, DESTINATION_LON);
         }
         flightPlan.start(waypoints);
-        FlightPlanPanel.open(flightPlan, XPLANE_ROOT);
+        ControlWindow.open(flightPlan, XPLANE_ROOT);   // S.E.CHANGE - ZR (flight plan + failure injection in one window)
         UIobj.setGPSValue((float) startData.lat, (float) startData.lon);
         UIobj.setIMUValue((float) startData.lat, (float) startData.lon);
         UIobj.setLidarValue((float) startData.lat, (float) startData.lon);
@@ -254,8 +252,8 @@ public class CopilotTakeoffAgent extends XPlaneAgent
                 // E.CHANGE - ZR
         try {
 
-            rlWriter = new PrintWriter("C:/Users/Brianna/Documents/CCAT_Xplane-QGC-Fresh/soar/preference_values.txt");
-            resultWriter = new PrintWriter("C:/Users/Brianna/Documents/CCAT_Xplane-QGC-Fresh/soar/testing_results.txt");
+            rlWriter = new PrintWriter("D:/SeniorProject/CCAT_Xplane-QGC/soar/preference_values.txt");
+            resultWriter = new PrintWriter("D:/SeniorProject/CCAT_Xplane-QGC/soar/testing_results.txt");
         } catch (FileNotFoundException e) {
             e.printStackTrace();
         }
@@ -269,7 +267,7 @@ public class CopilotTakeoffAgent extends XPlaneAgent
             //System.out.println(pathToSoar);
             // PATH TO SOAR FILE IMPORTANT
             //pathToSoar = "C:/Users/ahmii/learning_agent/FIT_AHMIIAS-master/lvca/code/LearningPrototype/src/main/soar/com/soartech/integrated-learning-agent/load.soar";
-            pathToSoar = "C:/Users/Brianna/Documents/CCAT_Xplane-QGC-Fresh/agents/Full Learning Agent with Macros/load.soar";
+            pathToSoar = "D:/SeniorProject/CCAT_Xplane-QGC/agents/Full Learning Agent with Macros/load.soar";
             SoarCommands.source(sagt.getInterpreter(), pathToSoar);
             System.out.println("There are now " + sagt.getProductions().getProductionCount() + " productions loaded");
 

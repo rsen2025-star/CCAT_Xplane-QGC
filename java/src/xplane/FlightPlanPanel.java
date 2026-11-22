@@ -22,7 +22,7 @@ import java.awt.*;
                    FlightPlan's LEG_SWITCH_KM of it); later ones grey
       destination  grey outline, black on the final leg, green once landed there
 */
-public class FlightPlanPanel extends JFrame
+public class FlightPlanPanel extends JPanel   // S.E.CHANGE - ZR (was a JFrame; now hosted by ControlWindow)
 {
     private static final Color BOX = new Color(22, 96, 128);
     private static final Color BOX_EDGE = new Color(14, 40, 56);
@@ -33,7 +33,7 @@ public class FlightPlanPanel extends JFrame
     private static final int WIDTH = 428, PAD = 34, BOX_H = 56, ROW_H = 34, LIST_PAD = 22, MIN_LIST_H = 160;
     private static final int COL_W = 360;          // width of one waypoint column (fits the distance)
     private static final int OVERHEAD_H = 240;     // title bar, boxes, button, padding (everything but the list)
-    private static final int PREFERRED_Y = 280;    // below the Failure Injection window
+    // S.E.CHANGE - ZR (window placement moved to ControlWindow)
     private int rowsPerColumn = Integer.MAX_VALUE; // long routes wrap into more columns
 
     private enum State { REMAINING, NEXT, DONE }
@@ -46,16 +46,12 @@ public class FlightPlanPanel extends JFrame
     private final JLabel status = new JLabel(" ");
     private boolean planning = false;
 
-    public static FlightPlanPanel open(FlightPlan plan, String xplaneRoot)
+    // S.CHANGE - ZR
+    // open() removed: ControlWindow creates this panel and hosts it
+    public FlightPlanPanel(FlightPlan plan, String xplaneRoot)
     {
-        FlightPlanPanel p = new FlightPlanPanel(plan, xplaneRoot);
-        SwingUtilities.invokeLater(() -> p.setVisible(true));
-        return p;
-    }
-
-    private FlightPlanPanel(FlightPlan plan, String xplaneRoot)
-    {
-        super("Flight Plan");
+        super(new BorderLayout());
+        // E.CHANGE - ZR
         this.plan = plan;
         this.xplaneRoot = xplaneRoot;
 
@@ -76,23 +72,18 @@ public class FlightPlanPanel extends JFrame
         bottom.add(destinationBox, BorderLayout.NORTH);
         bottom.add(controls, BorderLayout.SOUTH);
 
-        JPanel root = new JPanel(new BorderLayout());
-        root.setBackground(Color.WHITE);
-        root.setBorder(BorderFactory.createEmptyBorder(PAD, PAD, 16, PAD));
-        root.add(departureBox, BorderLayout.NORTH);
-        root.add(list, BorderLayout.CENTER);
-        root.add(bottom, BorderLayout.SOUTH);
-        setContentPane(root);
+        // S.CHANGE - ZR
+        // This panel is the content now (it used to build a root panel for its own frame)
+        setBackground(Color.WHITE);
+        setBorder(BorderFactory.createEmptyBorder(PAD, PAD, 16, PAD));
+        add(departureBox, BorderLayout.NORTH);
+        add(list, BorderLayout.CENTER);
+        add(bottom, BorderLayout.SOUTH);
         sizeList();
         if (!plan.hasRoute()) setStatus("No destination yet", false);
 
-        setDefaultCloseOperation(DISPOSE_ON_CLOSE);
-        setAlwaysOnTop(true);
-        setResizable(false);
-        pack();
-        setLocation(10, PREFERRED_Y);
-        placeOnScreen();
         new Timer(250, e -> refresh()).start();
+        // E.CHANGE - ZR
     }
 
     // Generate a route from the typed codes, off the Swing thread (reading navdata takes ~2 s)
@@ -132,8 +123,10 @@ public class FlightPlanPanel extends JFrame
                 setStatus(m, err);
                 destinationBox.field.setText(plan.getDestinationName());
                 sizeList();
-                pack();
-                placeOnScreen();
+                // S.CHANGE - ZR
+                Window host = SwingUtilities.getWindowAncestor(this);
+                if (host instanceof ControlWindow) ((ControlWindow) host).refit();
+                // E.CHANGE - ZR
                 refresh();
             });
         }, "RoutePlanner").start();
@@ -159,13 +152,7 @@ public class FlightPlanPanel extends JFrame
                 Math.max(MIN_LIST_H, rows * ROW_H + 2 * LIST_PAD)));
     }
 
-    // Keep the window on screen: below the Failure Injection window if it fits, otherwise higher up
-    private void placeOnScreen()
-    {
-        Rectangle screen = GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds();
-        int y = Math.max(screen.y, Math.min(PREFERRED_Y, screen.y + screen.height - getHeight()));
-        setLocation(getX() == 0 ? 10 : getX(), y);
-    }
+    // S.E.CHANGE - ZR (placeOnScreen removed: ControlWindow.refit() keeps the window on screen)
 
     private void refresh()
     {

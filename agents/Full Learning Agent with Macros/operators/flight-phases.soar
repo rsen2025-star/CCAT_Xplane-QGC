@@ -67,6 +67,16 @@ echo "\nLoading flight-phases.soar"
 ###   cruise-shed-step           lift throttle change per decision when shedding in
 ###                              cruise; smaller than lift-step so the AP can raise
 ###                              the nose as the rotors unload
+# S.CHANGE - ZR
+###   terrain-min-agl            ft: in cruise, below this height above ground the
+###                              agent raises its cruise altitude (TERRAIN AVOIDANCE)
+###   terrain-margin             ft: extra clearance added on top of the shortfall
+###   terrain-gap                ft: only raise again once the altitude target is
+###                              within this of the aircraft (not still climbing)
+###   terrain-climb-vs           fpm: climb rate when raising for terrain. GUESSED -
+###                              tune to what the aircraft can hold on the wing
+###   terrain-max-altitude       ft MSL: no further raises at/above this
+# E.CHANGE - ZR
 ##############################################
 sp {apply*initialize*flight-phases
     (state <s> ^operator.name initialize
@@ -106,7 +116,14 @@ sp {apply*initialize*flight-phases
          ^min-wing-speed 25
          ^cruise-lift 0.6
          ^max-cruise-sink -100
-         ^cruise-shed-step -0.005)
+         ^cruise-shed-step -0.005
+         # S.CHANGE - ZR
+         ^terrain-min-agl 1500
+         ^terrain-margin 500
+         ^terrain-gap 200
+         ^terrain-climb-vs 800
+         ^terrain-max-altitude 12000)
+         # E.CHANGE - ZR
     (<out> ^pusher-throttle -1.0
            ^autopilot off
            ^target-heading none
@@ -252,10 +269,13 @@ sp {apply*begin-landing*restore-lift
 ### around and steering would start a circle.
 ##############################################
 # S.CHANGE - ZR
-# Best (>) preference, was worst (<): this is only proposed when the bearing
-# changed and clears itself once applied. As worst it was starved by the
-# cruise lift-shedding operator (proposed nearly every decision), so the heading
-# bug was not set and the aircraft flew circles until the shedding finished.
+# Best, indifferent (> =) preference, was worst (<): this is only proposed when
+# the bearing changed and clears itself once applied. As worst it was starved by
+# the cruise lift-shedding operator (proposed nearly every decision), so the
+# heading bug was not set and the aircraft flew circles until the shedding
+# finished. Two operators with only > tie and stall the agent, so the
+# begin-landing / start-vertical-descent case is ranked by the compare rule
+# below, as the failure-handling operators do (> =).
 sp {flight*propose*follow-bearing
     (state <s> ^flight-mode horizontal
               -^capabilities.navigation lost
@@ -266,10 +286,20 @@ sp {flight*propose*follow-bearing
     (<fd> ^bearing-to-target <b>
           ^distance-to-target > <km>)
 -->
-    (<s> ^operator <o> + >)
+    (<s> ^operator <o> + > =)
     (<o> ^name follow-bearing
          ^bearing <b>
          ^old-heading <h>)
+}
+
+# The landing transitions beat steering (both best would be an operator tie).
+sp {flight*compare*landing-before-follow-bearing
+    (state <s> ^operator <o1> +
+               ^operator { <o2> <> <o1> } +)
+    (<o1> ^name << begin-landing start-vertical-descent >>)
+    (<o2> ^name follow-bearing)
+-->
+    (<s> ^operator <o1> > <o2>)
 }
 # E.CHANGE - ZR
 
@@ -283,6 +313,138 @@ sp {flight*apply*follow-bearing
 -->
     (<out> ^target-heading <h> - <b> +)
 }
+
+# S.CHANGE - ZR
+##############################################
+### TERRAIN AVOIDANCE - reactive, from the radar altimeter (^agl). The agent only
+### knows the height above ground under it, not the terrain ahead, so this is a
+### backstop: in cruise, when agl falls below terrain-min-agl, raise the cruise
+### altitude to the current altitude plus the shortfall plus terrain-margin and
+### climb there at terrain-climb-vs. Not in the landing phases (the agent is meant
+### to come down then), and not once the radar altimeter has failed or reads 0
+### (Java reports 0 when it cannot read it). Raises again each time the new
+### altitude is reached and agl is still low.
+### Two steps, like abort-landing's VS reset: Java only sends a VS command when
+### the value changes, so the VS command is cleared when the altitude is raised
+### and set again by resume-terrain-climb.
+##############################################
+sp {flight*elaborate*terrain-target-gap
+    (state <s> ^flight-mode horizontal
+               ^landing no
+               ^io <io>)
+    (<io> ^input-link.flightdata.altitude <alt>
+          ^output-link.target-altitude <ta>)
+-->
+    (<s> ^terrain-target-gap (- <ta> <alt>))
+}
+
+sp {flight*propose*raise-for-terrain
+    (state <s> ^flight-mode horizontal
+               ^landing no
+               ^terrain-target-gap < <g>
+               ^params <p>
+               ^io <io>)
+    (<p> ^terrain-min-agl <min>
+         ^terrain-margin <m>
+         ^terrain-gap <g>
+         ^terrain-max-altitude <cap>)
+    (<io> ^input-link.flightdata <fd>
+          ^output-link.target-altitude <ta>)
+    (<fd> ^agl { > 0.0 < <min> <agl> }
+          ^altitude { < <cap> <alt> }
+          ^failures.radar-altimeter ok)
+-->
+    (<s> ^operator <o> + >)
+    (<o> ^name raise-for-terrain
+         ^old-target <ta>
+         ^new-target (+ (+ <alt> (- <min> <agl>)) <m>))
+}
+
+sp {flight*apply*raise-for-terrain*altitude
+    (state <s> ^operator <o>
+               ^io.output-link <out>)
+    (<o> ^name raise-for-terrain
+         ^old-target <ta>
+         ^new-target <nt>)
+    (<out> ^target-altitude <ta>)
+-->
+    (<out> ^target-altitude <ta> - <nt> +)
+    (write (crlf) |Terrain: low above ground, raising cruise altitude to | <nt>)
+}
+
+# Only replaces a value that differs; replacing a WME with the same value would
+# remove it.
+sp {flight*apply*raise-for-terrain*clear-vs
+    (state <s> ^operator.name raise-for-terrain
+               ^io.output-link <out>)
+    (<out> ^target-vs { <tv> <> none })
+-->
+    (<out> ^target-vs <tv> - none +)
+}
+
+# VS command cleared while the altitude target is well above the aircraft (a raise
+# for terrain is pending): send the climb.
+sp {flight*propose*resume-terrain-climb
+    (state <s> ^flight-mode horizontal
+               ^landing no
+               ^terrain-target-gap > <g>
+               ^params <p>
+               ^io.output-link.target-vs none)
+    (<p> ^terrain-climb-vs <v>
+         ^terrain-gap <g>)
+-->
+    (<s> ^operator <o> + >)
+    (<o> ^name resume-terrain-climb
+         ^vs <v>)
+}
+
+sp {flight*apply*resume-terrain-climb
+    (state <s> ^operator <o>
+               ^io.output-link <out>)
+    (<o> ^name resume-terrain-climb
+         ^vs <v>)
+    (<out> ^target-vs none)
+-->
+    (<out> ^target-vs none - <v> +)
+}
+
+# Terrain avoidance runs before anything not already ranked above it. The
+# failure-handling operators and the landing/abort operators keep their
+# existing priority over it (and rank themselves above it), so those names are
+# left out here to avoid a conflicting pair.
+sp {flight*compare*terrain-first
+    (state <s> ^operator <o1> +
+               ^operator { <o2> <> <o1> } +)
+    (<o1> ^name << raise-for-terrain resume-terrain-climb >>)
+    (<o2> -^name << raise-for-terrain resume-terrain-climb begin-landing
+                    touchdown abort-landing recognize-failure clear-failure
+                    adapt-lift-params switch-position-sensor abort-takeoff
+                    abort-climb-and-land failure-begin-landing
+                    cut-failed-pusher-in-decel maintain-wing-borne-cruise
+                    emergency-all-propulsion-loss resume-normal-flight >>)
+-->
+    (<s> ^operator <o1> > <o2>)
+}
+
+# A landing approach wins over climbing for terrain (e.g. a hilly destination).
+sp {flight*compare*begin-landing-before-terrain
+    (state <s> ^operator <o1> +
+               ^operator { <o2> <> <o1> } +)
+    (<o1> ^name begin-landing)
+    (<o2> ^name << raise-for-terrain resume-terrain-climb >>)
+-->
+    (<s> ^operator <o1> > <o2>)
+}
+
+sp {flight*compare*terrain-steps-indifferent
+    (state <s> ^operator <o1> +
+               ^operator { <o2> <> <o1> } +)
+    (<o1> ^name << raise-for-terrain resume-terrain-climb >>)
+    (<o2> ^name << raise-for-terrain resume-terrain-climb >>)
+-->
+    (<s> ^operator <o1> = <o2>)
+}
+# E.CHANGE - ZR
 
 ##############################################
 ### LANDING - begin-landing once the agent is within land-at-target-km of the

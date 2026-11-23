@@ -4,8 +4,9 @@
 # NEW FILE - recognizes equipment and sensor failures published by Java on
 # io.input-link.flightdata.failures, evaluates the aircraft's remaining
 # capabilities across vertical lift, forward propulsion, navigation, and
-# altitude sensing, and selects an appropriate response for the current
-# flight phase (see FailureInjector.java and CopilotTakeoffAgent.java).
+# altitude sensing, and selects/applies appropriate responses in parallel for
+# single or multiple simultaneous failures (see FailureInjector.java,
+# FailureResponseHandler.java, FailureScenario.java, CopilotTakeoffAgent.java).
 #
 #   inputs  (io.input-link.flightdata.failures):
 #     active-count               number of active injected faults
@@ -20,13 +21,22 @@
 #     lift                       full (4 working) | degraded (3 working) | critical (<=2 working)
 #     working-lift-engines       0..4
 #     failed-lift-engines        0..4
+#     target-descent-throttle    0.75 (full) | 0.90 (degraded) | 1.0 (critical)
+#     target-min-descent-lift    0.20 (full) | 0.45 (degraded) | 0.65 (critical)
+#     target-min-decel-lift      0.30 (full) | 0.45 (degraded) | 0.65 (critical)
 #     pusher                     ok | failed
+#     pusher-failed-count        0..1
 #     navigation                 full (3 ok) | redundant (2 ok) | single-sensor (1 ok) | lost (0 ok)
 #     working-nav-sensors        0..3
+#     failed-nav-sensors         0..3
 #     preferred-nav-sensor       gps | imu | lidar | none
 #     altitude-sensing           full | agl-only | baro-only | lost
+#     failed-altimeters          0..2
+#     total-active-failures      0..10
+#     multi-failure              yes (>=2 active faults) | no (<2 active faults)
 #
-#   responses (state ^failure-response / io.output-link.failure-response):
+#   responses (state ^failure-response / io.output-link.failure-response,
+#              plus state ^active-failure-response for all parallel responses):
 #     nominal                    all systems operating normally
 #     switch-position-sensor     active nav sensor failed; switched to a healthy backup sensor
 #     use-radar-altimeter        barometric altimeter failed; using radar altimeter (AGL) for climb
@@ -52,8 +62,8 @@ sp {apply*initialize*failure-handling
     (<out> ^sensor-to-use gps)
 }
 
-# Mirrors the current failure response onto the output-link (i-supported,
-# like ^flight-phase in flight-phases.soar).
+# Mirrors the current primary failure response onto the output-link
+# (i-supported, like ^flight-phase in flight-phases.soar).
 sp {failure*elaborate*failure-response-output
     (state <s> ^failure-response <resp>
                ^io.output-link <out>)
@@ -61,11 +71,30 @@ sp {failure*elaborate*failure-response-output
     (<out> ^failure-response <resp>)
 }
 
+# S.CHANGE - AM (M3: parallel multi-failure execution)
+# Elaborate ^executing-failure-response yes whenever any failure-handling
+# operator is selected so that all non-conflicting responses (recognizing or
+# clearing multiple simultaneous faults, switching position sensors, flagging
+# unreliable sensors, adapting lift throttle parameters, and cutting a failed
+# pusher) execute in parallel within a single decision cycle.
+sp {failure*elaborate*executing-failure-response
+    (state <s> ^operator.name << recognize-failure clear-failure
+                                 adapt-lift-params switch-position-sensor
+                                 abort-takeoff abort-climb-and-land
+                                 failure-begin-landing cut-failed-pusher-in-decel
+                                 maintain-wing-borne-cruise
+                                 emergency-all-propulsion-loss
+                                 resume-normal-flight >>)
+-->
+    (<s> ^executing-failure-response yes)
+}
+# E.CHANGE - AM
+
 ##############################################
-### FAILURE RECOGNITION - detect when any equipment or sensor target on
-### io.input-link.flightdata.failures enters a fault mode, changes fault
-### mode, or is cleared back to ok. Records each active fault in working
-### memory (state ^recognized-failure) and logs the change.
+### FAILURE RECOGNITION - detect when one or more equipment or sensor targets
+### on io.input-link.flightdata.failures enter a fault mode, change fault
+### mode, or are cleared back to ok. Recognizes, updates, and clears all
+### simultaneous faults in parallel in a single decision cycle.
 ##############################################
 sp {failure*propose*recognize-failure*new
     (state <s> ^name takeoff
@@ -98,12 +127,13 @@ sp {failure*propose*recognize-failure*mode-changed
          ^old-mode <old-mode>)
 }
 
+# S.CHANGE - AM (M3: recognize/update/clear all simultaneous failures in parallel)
 sp {failure*apply*recognize-failure*new
-    (state <s> ^operator <o>)
-    (<o> ^name recognize-failure
-         ^target <target>
-         ^mode <mode>
-        -^old-mode)
+    (state <s> ^executing-failure-response yes
+               ^io.input-link.flightdata.failures <f>)
+    (<f> ^{ <target> << engine-0 engine-1 engine-2 engine-3 engine-4
+                        gps imu lidar altimeter radar-altimeter >> }
+          { <mode> <> ok })
    -(<s> ^recognized-failure.target <target>)
 -->
     (<s> ^recognized-failure <rf>)
@@ -113,14 +143,14 @@ sp {failure*apply*recognize-failure*new
 }
 
 sp {failure*apply*recognize-failure*mode-changed
-    (state <s> ^operator <o>
+    (state <s> ^executing-failure-response yes
+               ^io.input-link.flightdata.failures <f>
                ^recognized-failure <rf>)
-    (<o> ^name recognize-failure
-         ^target <target>
-         ^mode <mode>
-         ^old-mode { <old-mode> <> <mode> })
+    (<f> ^{ <target> << engine-0 engine-1 engine-2 engine-3 engine-4
+                        gps imu lidar altimeter radar-altimeter >> }
+          { <mode> <> ok })
     (<rf> ^target <target>
-          ^mode <old-mode>)
+          ^mode { <old-mode> <> <mode> })
 -->
     (<rf> ^mode <old-mode> - <mode> +)
     (write (crlf) |[Failure] Updated | <target> | failure mode: | <old-mode> | -> | <mode>)
@@ -142,16 +172,25 @@ sp {failure*propose*clear-failure
 }
 
 sp {failure*apply*clear-failure
-    (state <s> ^operator <o>
+    (state <s> ^executing-failure-response yes
+               ^io.input-link.flightdata.failures <f>
                ^recognized-failure <rf>)
-    (<o> ^name clear-failure
-         ^target <target>
-         ^failure <rf>
-         ^old-mode <old-mode>)
+    (<rf> ^target <target>
+          ^mode <old-mode>)
+    (<f> ^<target> ok)
 -->
     (<s> ^recognized-failure <rf> -)
     (write (crlf) |[Failure] Cleared | <target> | failure (was | <old-mode> |)|)
 }
+
+sp {failure*apply*clear-failure*reset-climb-aborted
+    (state <s> ^executing-failure-response yes
+               ^climb-aborted yes
+               ^capabilities.total-active-failures 0)
+-->
+    (<s> ^climb-aborted yes -)
+}
+# E.CHANGE - AM
 
 ##############################################
 ### CAPABILITY EVALUATION - elaborate the aircraft's remaining capabilities
@@ -194,21 +233,30 @@ sp {failure*elaborate*capabilities*lift*full
     (state <s> ^capabilities <cap>)
     (<cap> ^failed-lift-engines 0)
 -->
-    (<cap> ^lift full)
+    (<cap> ^lift full
+           ^target-descent-throttle 0.75
+           ^target-min-descent-lift 0.2
+           ^target-min-decel-lift 0.3)
 }
 
 sp {failure*elaborate*capabilities*lift*degraded
     (state <s> ^capabilities <cap>)
     (<cap> ^failed-lift-engines 1)
 -->
-    (<cap> ^lift degraded)
+    (<cap> ^lift degraded
+           ^target-descent-throttle 0.90
+           ^target-min-descent-lift 0.45
+           ^target-min-decel-lift 0.45)
 }
 
 sp {failure*elaborate*capabilities*lift*critical
     (state <s> ^capabilities <cap>)
     (<cap> ^failed-lift-engines >= 2)
 -->
-    (<cap> ^lift critical)
+    (<cap> ^lift critical
+           ^target-descent-throttle 1.0
+           ^target-min-descent-lift 0.65
+           ^target-min-decel-lift 0.65)
 }
 
 ##############################################
@@ -220,14 +268,16 @@ sp {failure*elaborate*capabilities*pusher*ok
     (state <s> ^capabilities <cap>
                ^io.input-link.flightdata.failures.engine-4 ok)
 -->
-    (<cap> ^pusher ok)
+    (<cap> ^pusher ok
+           ^pusher-failed-count 0)
 }
 
 sp {failure*elaborate*capabilities*pusher*failed
     (state <s> ^capabilities <cap>
                ^io.input-link.flightdata.failures.engine-4 <> ok)
 -->
-    (<cap> ^pusher failed)
+    (<cap> ^pusher failed
+           ^pusher-failed-count 1)
 }
 
 ##############################################
@@ -262,7 +312,8 @@ sp {failure*elaborate*capabilities*nav-count
            ^imu-ok <i>
            ^lidar-ok <l>)
 -->
-    (<cap> ^working-nav-sensors (+ <g> <i> <l>))
+    (<cap> ^working-nav-sensors (+ <g> <i> <l>)
+           ^failed-nav-sensors (- 3 (+ <g> <i> <l>)))
 }
 
 sp {failure*elaborate*capabilities*navigation*full
@@ -329,7 +380,8 @@ sp {failure*elaborate*capabilities*altitude*full
     (<f> ^altimeter ok
          ^radar-altimeter ok)
 -->
-    (<cap> ^altitude-sensing full)
+    (<cap> ^altitude-sensing full
+           ^failed-altimeters 0)
 }
 
 sp {failure*elaborate*capabilities*altitude*agl-only
@@ -338,7 +390,8 @@ sp {failure*elaborate*capabilities*altitude*agl-only
     (<f> ^altimeter <> ok
          ^radar-altimeter ok)
 -->
-    (<cap> ^altitude-sensing agl-only)
+    (<cap> ^altitude-sensing agl-only
+           ^failed-altimeters 1)
 }
 
 sp {failure*elaborate*capabilities*altitude*baro-only
@@ -347,7 +400,8 @@ sp {failure*elaborate*capabilities*altitude*baro-only
     (<f> ^altimeter ok
          ^radar-altimeter <> ok)
 -->
-    (<cap> ^altitude-sensing baro-only)
+    (<cap> ^altitude-sensing baro-only
+           ^failed-altimeters 1)
 }
 
 sp {failure*elaborate*capabilities*altitude*lost
@@ -356,12 +410,45 @@ sp {failure*elaborate*capabilities*altitude*lost
     (<f> ^altimeter <> ok
          ^radar-altimeter <> ok)
 -->
-    (<cap> ^altitude-sensing lost)
+    (<cap> ^altitude-sensing lost
+           ^failed-altimeters 2)
 }
 
+# S.CHANGE - AM (M3: aggregate multi-failure count and parallel failure flag)
 ##############################################
-### RESPONSE DETERMINATION (ELABORATIONS) - derive control flags and the
-### high-level ^failure-response summary from the aircraft's capabilities.
+### 5. Compound / Multi-Failure Aggregation:
+###    Computes total active failures across all four subsystems and flags
+###    when multiple component failures are active in parallel.
+##############################################
+sp {failure*elaborate*capabilities*total-active-failures
+    (state <s> ^capabilities <cap>)
+    (<cap> ^failed-lift-engines <fle>
+           ^pusher-failed-count <pfc>
+           ^failed-nav-sensors <fns>
+           ^failed-altimeters <fa>)
+-->
+    (<cap> ^total-active-failures (+ <fle> <pfc> <fns> <fa>))
+}
+
+sp {failure*elaborate*capabilities*multi-failure*yes
+    (state <s> ^capabilities <cap>)
+    (<cap> ^total-active-failures >= 2)
+-->
+    (<cap> ^multi-failure yes)
+}
+
+sp {failure*elaborate*capabilities*multi-failure*no
+    (state <s> ^capabilities <cap>)
+    (<cap> ^total-active-failures < 2)
+-->
+    (<cap> ^multi-failure no)
+}
+# E.CHANGE - AM
+
+##############################################
+### RESPONSE DETERMINATION (ELABORATIONS) - derive control flags, all
+### concurrently active responses (^active-failure-response), and the
+### governing ^failure-response summary from the aircraft's capabilities.
 ##############################################
 
 # When the barometric altimeter has failed but the radar altimeter is ok,
@@ -471,9 +558,37 @@ sp {failure*elaborate*maintain-wing-borne
     (<s> ^maintain-wing-borne yes)
 }
 
-# Elaborate the active ^failure-response summary on the state.
+# S.CHANGE - AM (M3: track all simultaneously active failure responses in parallel)
+sp {failure*elaborate*active-response*switch-position-sensor
+    (state <s> ^capabilities.navigation << redundant single-sensor >>)
+-->
+    (<s> ^active-failure-response switch-position-sensor)
+}
+
+sp {failure*elaborate*active-response*use-radar-altimeter
+    (state <s> ^capabilities.altitude-sensing agl-only)
+-->
+    (<s> ^active-failure-response use-radar-altimeter)
+}
+
+sp {failure*elaborate*active-response*cautious-vertical-descent
+    (state <s> ^cautious-descent yes)
+-->
+    (<s> ^active-failure-response cautious-vertical-descent)
+}
+
+sp {failure*elaborate*active-response*primary
+    (state <s> ^failure-response <resp>)
+-->
+    (<s> ^active-failure-response <resp>)
+}
+# E.CHANGE - AM
+
+# Elaborate the governing ^failure-response summary on the state (mutually
+# exclusive and exhaustive across all single and multi-failure combinations).
 sp {failure*elaborate*response*nominal
-    (state <s> ^capabilities <cap>)
+    (state <s> -^climb-aborted yes
+               ^capabilities <cap>)
     (<cap> ^lift full
            ^pusher ok
            ^navigation full
@@ -489,13 +604,28 @@ sp {failure*elaborate*response*abort-takeoff
 }
 
 sp {failure*elaborate*response*abort-climb-and-land
-    (state <s> ^abort-climb yes)
+    (state <s> -^abort-takeoff yes
+               ^abort-climb yes)
 -->
     (<s> ^failure-response abort-climb-and-land)
 }
 
+# S.CHANGE - AM (M3: keep abort-climb-and-land response active during the aborted climb descent)
+sp {failure*elaborate*response*abort-climb-and-land*descending
+    (state <s> -^abort-takeoff yes
+               -^abort-climb yes
+                ^climb-aborted yes
+                ^capabilities.total-active-failures > 0)
+-->
+    (<s> ^failure-response abort-climb-and-land)
+}
+# E.CHANGE - AM
+
 sp {failure*elaborate*response*maintain-wing-borne-cruise
-    (state <s> ^maintain-wing-borne yes)
+    (state <s> -^abort-takeoff yes
+               -^abort-climb yes
+               -^climb-aborted yes
+                ^maintain-wing-borne yes)
 -->
     (<s> ^failure-response maintain-wing-borne-cruise)
 }
@@ -503,6 +633,7 @@ sp {failure*elaborate*response*maintain-wing-borne-cruise
 sp {failure*elaborate*response*emergency-descent
     (state <s> -^abort-takeoff yes
                -^abort-climb yes
+               -^climb-aborted yes
                ^capabilities <cap>)
     (<cap> ^lift critical
            ^pusher failed)
@@ -510,9 +641,24 @@ sp {failure*elaborate*response*emergency-descent
     (<s> ^failure-response emergency-descent)
 }
 
+# S.CHANGE - AM (M3: critical lift loss while already in vertical descent)
+sp {failure*elaborate*response*emergency-descent*vertical-critical-lift
+    (state <s> -^abort-takeoff yes
+               -^abort-climb yes
+               -^climb-aborted yes
+                ^flight-mode vertical
+                ^capabilities <cap>)
+    (<cap> ^lift critical
+           ^pusher ok)
+-->
+    (<s> ^failure-response emergency-descent)
+}
+# E.CHANGE - AM
+
 sp {failure*elaborate*response*forced-vertical-landing*pusher
     (state <s> -^abort-takeoff yes
                -^abort-climb yes
+               -^climb-aborted yes
                ^capabilities <cap>)
     (<cap> ^lift << full degraded >>
            ^pusher failed)
@@ -523,6 +669,7 @@ sp {failure*elaborate*response*forced-vertical-landing*pusher
 sp {failure*elaborate*response*forced-vertical-landing*sensors
     (state <s> -^abort-takeoff yes
                -^abort-climb yes
+               -^climb-aborted yes
                ^capabilities <cap>)
     (<cap> ^lift << full degraded >>
            ^pusher ok
@@ -534,6 +681,7 @@ sp {failure*elaborate*response*forced-vertical-landing*sensors
 sp {failure*elaborate*response*forced-vertical-landing*altimeters
     (state <s> -^abort-takeoff yes
                -^abort-climb yes
+               -^climb-aborted yes
                ^capabilities <cap>)
     (<cap> ^lift << full degraded >>
            ^pusher ok
@@ -546,6 +694,7 @@ sp {failure*elaborate*response*forced-vertical-landing*altimeters
 sp {failure*elaborate*response*precautionary-landing
     (state <s> -^abort-takeoff yes
                -^abort-climb yes
+               -^climb-aborted yes
                ^capabilities <cap>)
     (<cap> ^lift degraded
            ^pusher ok
@@ -558,6 +707,7 @@ sp {failure*elaborate*response*precautionary-landing
 sp {failure*elaborate*response*switch-position-sensor
     (state <s> -^abort-takeoff yes
                -^abort-climb yes
+               -^climb-aborted yes
                ^capabilities <cap>)
     (<cap> ^lift full
            ^pusher ok
@@ -567,35 +717,84 @@ sp {failure*elaborate*response*switch-position-sensor
     (<s> ^failure-response switch-position-sensor)
 }
 
-sp {failure*elaborate*response*use-radar-altimeter
+# S.CHANGE - AM (M3: when both a nav sensor and an altimeter are failed in
+# parallel, report whichever sensor/altimeter response was most recently
+# triggered while executing both fallbacks concurrently)
+sp {failure*elaborate*response*switch-position-sensor*parallel-altimeter
     (state <s> -^abort-takeoff yes
                -^abort-climb yes
+               -^climb-aborted yes
+               ^io.input-link.flightdata.failures.last-injected << gps imu lidar >>
                ^capabilities <cap>)
     (<cap> ^lift full
            ^pusher ok
-           ^navigation <> lost
+           ^navigation << redundant single-sensor >>
+           ^altitude-sensing << agl-only baro-only >>)
+-->
+    (<s> ^failure-response switch-position-sensor)
+}
+
+sp {failure*elaborate*response*use-radar-altimeter*altitude-only
+    (state <s> -^abort-takeoff yes
+               -^abort-climb yes
+               -^climb-aborted yes
+               ^capabilities <cap>)
+    (<cap> ^lift full
+           ^pusher ok
+           ^navigation full
            ^altitude-sensing agl-only)
 -->
     (<s> ^failure-response use-radar-altimeter)
 }
 
-sp {failure*elaborate*response*cautious-vertical-descent
+sp {failure*elaborate*response*use-radar-altimeter*parallel-nav
     (state <s> -^abort-takeoff yes
                -^abort-climb yes
+               -^climb-aborted yes
+               ^io.input-link.flightdata.failures.last-injected { <last> <> gps <> imu <> lidar }
                ^capabilities <cap>)
     (<cap> ^lift full
            ^pusher ok
-           ^navigation <> lost
+           ^navigation << redundant single-sensor >>
+           ^altitude-sensing agl-only)
+-->
+    (<s> ^failure-response use-radar-altimeter)
+}
+
+sp {failure*elaborate*response*cautious-vertical-descent*altitude-only
+    (state <s> -^abort-takeoff yes
+               -^abort-climb yes
+               -^climb-aborted yes
+               ^capabilities <cap>)
+    (<cap> ^lift full
+           ^pusher ok
+           ^navigation full
            ^altitude-sensing baro-only)
 -->
     (<s> ^failure-response cautious-vertical-descent)
 }
 
+sp {failure*elaborate*response*cautious-vertical-descent*parallel-nav
+    (state <s> -^abort-takeoff yes
+               -^abort-climb yes
+               -^climb-aborted yes
+               ^io.input-link.flightdata.failures.last-injected { <last> <> gps <> imu <> lidar }
+               ^capabilities <cap>)
+    (<cap> ^lift full
+           ^pusher ok
+           ^navigation << redundant single-sensor >>
+           ^altitude-sensing baro-only)
+-->
+    (<s> ^failure-response cautious-vertical-descent)
+}
+# E.CHANGE - AM
+
 ##############################################
-### RESPONSE 1: POSITION SENSOR SWITCHING
+### RESPONSE 1: POSITION SENSOR SWITCHING & PARALLEL UNRELIABLE FLAGGING
 ### When the currently selected position sensor on the output-link fails and
 ### at least one healthy backup sensor remains, switch ^sensor-to-use to the
-### preferred healthy sensor and flag the faulty sensor as unreliable.
+### preferred healthy sensor and flag all faulty position sensors as
+### unreliable in parallel.
 ##############################################
 sp {failure*propose*switch-position-sensor
     (state <s> ^capabilities <cap>
@@ -611,112 +810,122 @@ sp {failure*propose*switch-position-sensor
          ^to <backup>)
 }
 
+# S.CHANGE - AM (M3: execute sensor failover and multi-sensor unreliable flags
+# in parallel with any active failure-handling operator)
 sp {failure*apply*switch-position-sensor
-    (state <s> ^operator <o>
-               ^capabilities.navigation <nav>
+    (state <s> ^executing-failure-response yes
+               ^capabilities <cap>
                ^io.output-link <out>)
-    (<o> ^name switch-position-sensor
-         ^from <current>
-         ^to { <backup> <> <current> })
     (<out> ^sensor-to-use <current>)
+    (<cap> ^<current>-status failed
+           ^navigation { <nav> << redundant single-sensor >> }
+           ^preferred-nav-sensor { <backup> <> none <> <current> })
 -->
     (<out> ^sensor-to-use <current> - <backup> +)
     (write (crlf) |[Failure Response] Sensor | <current> | failed -> switching navigation to | <backup> | (capability: | <nav> |)|)
 }
 
 sp {failure*apply*switch-position-sensor*alert
-    (state <s> ^operator <o>
+    (state <s> ^executing-failure-response yes
+               ^capabilities <cap>
                ^io.output-link <out>)
-    (<o> ^name switch-position-sensor
-         ^from <current>)
-    (<out> ^alert-sensor-error { <old> <> <current> })
+    (<out> ^sensor-to-use <current>
+           ^alert-sensor-error { <old> <> <current> })
+    (<cap> ^<current>-status failed
+           ^navigation << redundant single-sensor >>
+           ^preferred-nav-sensor { <backup> <> none <> <current> })
 -->
     (<out> ^alert-sensor-error <old> - <current> +)
 }
 
-sp {failure*apply*switch-position-sensor*mark-gps-unreliable
-    (state <s> ^operator <o>
+sp {failure*apply*mark-gps-unreliable
+    (state <s> ^executing-failure-response yes
+               ^capabilities.gps-status failed
                ^io.output-link <out>)
-    (<o> ^name switch-position-sensor
-         ^from gps)
    -(<out> ^GPSUnreliable yes)
 -->
     (<out> ^GPSUnreliable yes)
 }
 
-sp {failure*apply*switch-position-sensor*mark-imu-unreliable
-    (state <s> ^operator <o>
+sp {failure*apply*mark-imu-unreliable
+    (state <s> ^executing-failure-response yes
+               ^capabilities.imu-status failed
                ^io.output-link <out>)
-    (<o> ^name switch-position-sensor
-         ^from imu)
    -(<out> ^IMUUnreliable yes)
 -->
     (<out> ^IMUUnreliable yes)
 }
 
-sp {failure*apply*switch-position-sensor*mark-lidar-unreliable
-    (state <s> ^operator <o>
+sp {failure*apply*mark-lidar-unreliable
+    (state <s> ^executing-failure-response yes
+               ^capabilities.lidar-status failed
                ^io.output-link <out>)
-    (<o> ^name switch-position-sensor
-         ^from lidar)
    -(<out> ^LIDARUnreliable yes)
 -->
     (<out> ^LIDARUnreliable yes)
 }
 
+sp {failure*apply*clear-gps-unreliable
+    (state <s> ^executing-failure-response yes
+               ^capabilities.gps-status ok
+               ^io.output-link <out>)
+    (<out> ^GPSUnreliable yes)
+-->
+    (<out> ^GPSUnreliable yes -)
+}
+
+sp {failure*apply*clear-imu-unreliable
+    (state <s> ^executing-failure-response yes
+               ^capabilities.imu-status ok
+               ^io.output-link <out>)
+    (<out> ^IMUUnreliable yes)
+-->
+    (<out> ^IMUUnreliable yes -)
+}
+
+sp {failure*apply*clear-lidar-unreliable
+    (state <s> ^executing-failure-response yes
+               ^capabilities.lidar-status ok
+               ^io.output-link <out>)
+    (<out> ^LIDARUnreliable yes)
+-->
+    (<out> ^LIDARUnreliable yes -)
+}
+# E.CHANGE - AM
+
 ##############################################
 ### RESPONSE 2: ADAPT LIFT THROTTLE PARAMETERS FOR REMAINING LIFT CAPABILITY
-### With 1 lift rotor out (degraded, 3 of 4 rotors working), raise the
-### descent and minimum lift throttle settings so the remaining 3 rotors
-### supply enough thrust to hold pitch while slowing and arrest sink rate
-### during the vertical descent. Restores defaults if all 4 rotors are ok.
+### With 1 lift rotor out (degraded, 3 of 4 rotors working) or >=2 out
+### (critical), raise the descent and minimum lift throttle settings so the
+### remaining rotors supply enough thrust to hold pitch while slowing and
+### arrest sink rate during vertical descent. Applies in parallel with any
+### active failure-handling operator and restores defaults when all 4 are ok.
 ##############################################
-sp {failure*propose*adapt-lift-params*degraded
-    (state <s> ^capabilities.lift degraded
+sp {failure*propose*adapt-lift-params
+    (state <s> ^capabilities <cap>
                ^params <p>)
-    (<p> ^descent-throttle { <dt> <> 0.90 })
+    (<cap> ^lift <mode>
+           ^target-descent-throttle <new-dt>
+           ^target-min-descent-lift <new-mdl>
+           ^target-min-decel-lift <new-mdcl>)
+    (<p> ^descent-throttle { <dt> <> <new-dt> })
 -->
     (<s> ^operator <o> + > =)
-    (<o> ^name adapt-lift-params
-         ^mode degraded
-         ^descent-throttle 0.90
-         ^min-descent-lift 0.45
-         ^min-decel-lift 0.45)
-}
-
-sp {failure*propose*adapt-lift-params*critical
-    (state <s> ^capabilities.lift critical
-               ^params <p>)
-    (<p> ^descent-throttle { <dt> <> 1.0 })
--->
-    (<s> ^operator <o> + > =)
-    (<o> ^name adapt-lift-params
-         ^mode critical
-         ^descent-throttle 1.0
-         ^min-descent-lift 0.65
-         ^min-decel-lift 0.65)
-}
-
-sp {failure*propose*adapt-lift-params*restore-full
-    (state <s> ^capabilities.lift full
-               ^params <p>)
-    (<p> ^descent-throttle { <dt> <> 0.75 })
--->
-    (<s> ^operator <o> + > =)
-    (<o> ^name adapt-lift-params
-         ^mode full
-         ^descent-throttle 0.75
-         ^min-descent-lift 0.2
-         ^min-decel-lift 0.3)
-}
-
-sp {failure*apply*adapt-lift-params*descent-throttle
-    (state <s> ^operator <o>
-               ^params <p>)
     (<o> ^name adapt-lift-params
          ^mode <mode>
          ^descent-throttle <new-dt>
-         ^min-descent-lift <new-mdl>)
+         ^min-descent-lift <new-mdl>
+         ^min-decel-lift <new-mdcl>)
+}
+
+# S.CHANGE - AM (M3: adapt lift params and raise active throttle floor in parallel)
+sp {failure*apply*adapt-lift-params*descent-throttle
+    (state <s> ^executing-failure-response yes
+               ^capabilities <cap>
+               ^params <p>)
+    (<cap> ^lift <mode>
+           ^target-descent-throttle <new-dt>
+           ^target-min-descent-lift <new-mdl>)
     (<p> ^descent-throttle { <old-dt> <> <new-dt> })
 -->
     (<p> ^descent-throttle <old-dt> - <new-dt> +)
@@ -724,24 +933,59 @@ sp {failure*apply*adapt-lift-params*descent-throttle
 }
 
 sp {failure*apply*adapt-lift-params*min-descent-lift
-    (state <s> ^operator <o>
+    (state <s> ^executing-failure-response yes
+               ^capabilities.target-min-descent-lift <new-mdl>
                ^params <p>)
-    (<o> ^name adapt-lift-params
-         ^min-descent-lift <new-mdl>)
     (<p> ^min-descent-lift { <old-mdl> <> <new-mdl> })
 -->
     (<p> ^min-descent-lift <old-mdl> - <new-mdl> +)
 }
 
 sp {failure*apply*adapt-lift-params*min-decel-lift
-    (state <s> ^operator <o>
+    (state <s> ^executing-failure-response yes
+               ^capabilities.target-min-decel-lift <new-mdcl>
                ^params <p>)
-    (<o> ^name adapt-lift-params
-         ^min-decel-lift <new-mdcl>)
     (<p> ^min-decel-lift { <old-mdcl> <> <new-mdcl> })
 -->
     (<p> ^min-decel-lift <old-mdcl> - <new-mdcl> +)
 }
+
+# If a lift rotor fails while already decelerating on approach (or when
+# initiating an in-place landing after cruise lift was shed), immediately
+# bring the lift throttle up to at least target-min-decel-lift.
+sp {failure*apply*adapt-lift-params*boost-decel-throttle
+    (state <s> ^executing-failure-response yes
+               ^landing decelerate
+              -^maintain-wing-borne yes
+              -^operator.name << maintain-wing-borne-cruise
+                                 emergency-all-propulsion-loss
+                                 resume-normal-flight >>
+               ^capabilities.target-min-decel-lift <min>
+               ^io.output-link <out>)
+    (<out> ^throttle { <t> < <min> })
+-->
+    (<out> ^throttle <t> - <min> +)
+}
+
+# If a lift rotor fails while already in vertical-descent, immediately raise
+# the lift throttle to target-descent-throttle so the remaining rotors catch
+# the aircraft without waiting for incremental 0.02 lift steps.
+sp {failure*apply*adapt-lift-params*boost-vertical-descent-throttle
+    (state <s> ^executing-failure-response yes
+               ^landing vertical-descent
+              -^operator.name << abort-takeoff abort-climb-and-land
+                                 maintain-wing-borne-cruise
+                                 emergency-all-propulsion-loss
+                                 resume-normal-flight >>
+               ^capabilities <cap>
+               ^io.output-link <out>)
+    (<cap> ^lift << degraded critical >>
+           ^target-descent-throttle <dt>)
+    (<out> ^throttle { <t> < <dt> })
+-->
+    (<out> ^throttle <t> - <dt> +)
+}
+# E.CHANGE - AM
 
 ##############################################
 ### RESPONSE 3: ALTIMETER & RADAR ALTIMETER FALLBACKS
@@ -750,6 +994,8 @@ sp {failure*apply*adapt-lift-params*min-decel-lift
 ### - When radar altimeter fails or lift is degraded (^cautious-descent yes),
 ###   hold the slow touchdown descent rate (descent-vs-low, -150 fpm) for
 ###   the entire vertical descent instead of waiting for AGL <= 300 ft.
+### - Continue cruise lift shedding/restoring during non-landing sensor or
+###   altimeter fallback responses so the wing transition completes normally.
 ##############################################
 sp {failure*propose*begin-cruise*agl-fallback
     (state <s> ^flight-mode vertical
@@ -771,14 +1017,66 @@ sp {failure*elaborate*lift-target-vs*cautious
     (<s> ^lift-target-vs <v>)
 }
 
+# S.CHANGE - AM (M3: keep cruise lift shedding/restoring active during sensor/altimeter fallbacks)
+sp {failure*propose*adjust-lift*cruise-shed*sensor-fallback
+    (state <s> ^flight-mode horizontal
+               ^landing no
+               ^failure-response << switch-position-sensor
+                                    use-radar-altimeter
+                                    cautious-vertical-descent >>
+               ^params <p>
+               ^io <io>)
+    (<p> ^wing-borne-speed <wbs>
+         ^max-cruise-sink <sink>
+         ^cruise-shed-step <step>)
+    (<io> ^input-link.flightdata <fd>
+          ^output-link.throttle { <t> > 0.0 })
+    (<fd> ^airspeed >= <wbs>
+          ^vertical-speed > <sink>)
+-->
+    (<s> ^operator <o> + =)
+    (<o> ^name adjust-lift
+         ^throttle <t>
+         ^step <step>)
+}
+
+sp {failure*propose*adjust-lift*cruise-restore*sensor-fallback
+    (state <s> ^flight-mode horizontal
+               ^landing no
+               ^failure-response << switch-position-sensor
+                                    use-radar-altimeter
+                                    cautious-vertical-descent >>
+               ^params <p>
+               ^io <io>)
+    (<p> ^min-wing-speed <mws>
+         ^cruise-lift <cl>
+         ^lift-step <step>)
+    (<io> ^input-link.flightdata.airspeed < <mws>
+          ^output-link.throttle { <t> < <cl> })
+-->
+    (<s> ^operator <o> + =)
+    (<o> ^name adjust-lift
+         ^throttle <t>
+         ^step <step>)
+}
+# E.CHANGE - AM
+
 ##############################################
 ### RESPONSE 4: ABORT TAKEOFF ON THE GROUND
 ### If an engine or critical sensor fails while still on the runway before
-### liftoff, cut the throttle to 0.0 and stay on the ground.
+### liftoff, cut both lift and pusher throttle to 0.0 and stay on the ground.
 ##############################################
 sp {failure*propose*abort-takeoff
     (state <s> ^abort-takeoff yes
                ^io.output-link.throttle > 0.0)
+-->
+    (<s> ^operator <o> + > =)
+    (<o> ^name abort-takeoff)
+}
+
+sp {failure*propose*abort-takeoff*pusher
+    (state <s> ^abort-takeoff yes
+               ^io.output-link.pusher-throttle <> 0.0)
 -->
     (<s> ^operator <o> + > =)
     (<o> ^name abort-takeoff)
@@ -823,14 +1121,15 @@ sp {failure*apply*abort-climb-and-land
                ^io.output-link <out>)
 -->
     (<s> ^landing <l> - vertical-descent +
-         ^emergency-land yes)
+         ^emergency-land yes
+         ^climb-aborted yes)
     (<out> ^VTOLMode vertical)
     (write (crlf) |[Failure Response] Failure during vertical climb -> aborting climb, starting vertical descent|)
 }
 
 sp {failure*apply*abort-climb-and-land*throttle
     (state <s> ^operator.name abort-climb-and-land
-               ^params.descent-throttle <dt>
+               ^capabilities.target-descent-throttle <dt>
                ^io.output-link <out>)
     (<out> ^throttle { <t> <> <dt> })
 -->
@@ -865,7 +1164,7 @@ sp {failure*apply*abort-climb-and-land*remove-other-vtolmode
 ### RESPONSE 6: PRECAUTIONARY / FORCED IN-PLACE LANDING FROM CRUISE
 ### In horizontal cruise when vertical lift remains available (full or
 ### degraded), initiate an immediate in-place landing (^landing decelerate
-### with ^emergency-land yes) if:
+### with ^emergency-land yes) if one or more of the following occur:
 ###   - the pusher prop has failed (cannot sustain forward cruise),
 ###   - 1 lift rotor has failed (degraded lift: land while 3 rotors work),
 ###   - all 3 position sensors have failed (cannot navigate to destination),
@@ -873,63 +1172,78 @@ sp {failure*apply*abort-climb-and-land*remove-other-vtolmode
 ### ^emergency-land yes sets ^target-airspeed 0 immediately so the aircraft
 ### slows down where it is instead of flying on to the distant waypoint.
 ##############################################
-sp {failure*propose*failure-begin-landing*pusher-failed
+# S.CHANGE - AM (M3: elaborate all active in-place landing reasons in parallel)
+sp {failure*elaborate*in-place-landing-reason*pusher-failed
     (state <s> ^flight-mode horizontal
-               ^landing no
                ^capabilities <cap>)
     (<cap> ^lift << full degraded >>
            ^pusher failed)
 -->
-    (<s> ^operator <o> + > =)
-    (<o> ^name failure-begin-landing
-         ^reason pusher-failed)
+    (<s> ^in-place-landing-reason pusher-failed)
 }
 
-sp {failure*propose*failure-begin-landing*degraded-lift
+sp {failure*elaborate*in-place-landing-reason*degraded-lift
     (state <s> ^flight-mode horizontal
-               ^landing no
                ^capabilities <cap>)
     (<cap> ^lift degraded
            ^pusher ok)
 -->
-    (<s> ^operator <o> + > =)
-    (<o> ^name failure-begin-landing
-         ^reason degraded-lift)
+    (<s> ^in-place-landing-reason degraded-lift)
 }
 
-sp {failure*propose*failure-begin-landing*navigation-lost
+sp {failure*elaborate*in-place-landing-reason*navigation-lost
     (state <s> ^flight-mode horizontal
-               ^landing no
                ^capabilities <cap>)
     (<cap> ^lift << full degraded >>
            ^navigation lost)
 -->
-    (<s> ^operator <o> + > =)
-    (<o> ^name failure-begin-landing
-         ^reason navigation-lost)
+    (<s> ^in-place-landing-reason navigation-lost)
 }
 
-sp {failure*propose*failure-begin-landing*altitude-lost
+sp {failure*elaborate*in-place-landing-reason*altitude-lost
     (state <s> ^flight-mode horizontal
-               ^landing no
                ^capabilities <cap>)
     (<cap> ^lift << full degraded >>
            ^altitude-sensing lost)
 -->
+    (<s> ^in-place-landing-reason altitude-sensing-lost)
+}
+
+sp {failure*propose*failure-begin-landing
+    (state <s> ^flight-mode horizontal
+               ^landing no
+               ^in-place-landing-reason <reason>)
+-->
     (<s> ^operator <o> + > =)
     (<o> ^name failure-begin-landing
-         ^reason altitude-sensing-lost)
+         ^reason <reason>)
 }
 
 sp {failure*apply*failure-begin-landing
-    (state <s> ^operator <o>
+    (state <s> ^operator.name failure-begin-landing
                ^landing no)
-    (<o> ^name failure-begin-landing
-         ^reason <reason>)
 -->
     (<s> ^landing no - decelerate +
          ^emergency-land yes)
+}
+
+sp {failure*apply*failure-begin-landing*log-reasons
+    (state <s> ^operator.name failure-begin-landing
+               ^landing no
+               ^in-place-landing-reason <reason>)
+-->
     (write (crlf) |[Failure Response] Initiating in-place landing due to | <reason> |: slowing down for vertical descent|)
+}
+
+# With cruise lift shed to 0.0 during wing-borne cruise, restore lift rotors
+# to target-min-decel-lift when starting an in-place failure landing.
+sp {failure*apply*failure-begin-landing*restore-lift
+    (state <s> ^operator.name failure-begin-landing
+               ^capabilities.target-min-decel-lift <min>
+               ^io.output-link <out>)
+    (<out> ^throttle { <t> < <min> })
+-->
+    (<out> ^throttle <t> - <min> +)
 }
 
 sp {failure*apply*failure-begin-landing*cut-failed-pusher
@@ -941,8 +1255,9 @@ sp {failure*apply*failure-begin-landing*cut-failed-pusher
     (<out> ^pusher-throttle <pt> - 0.0 +)
 }
 
-# If the pusher fails after normal approach deceleration has already begun,
-# zero out pusher-throttle and mark emergency-land so target-airspeed is 0.
+# If the pusher fails or all navigation/altitude sensors are lost after
+# normal approach deceleration has already begun, zero out any failed pusher
+# throttle and mark ^emergency-land yes so target-airspeed becomes 0 in place.
 sp {failure*propose*cut-failed-pusher-in-decel
     (state <s> ^landing decelerate
                ^capabilities.pusher failed
@@ -952,8 +1267,30 @@ sp {failure*propose*cut-failed-pusher-in-decel
     (<o> ^name cut-failed-pusher-in-decel)
 }
 
-sp {failure*apply*cut-failed-pusher-in-decel
-    (state <s> ^operator.name cut-failed-pusher-in-decel
+sp {failure*propose*cut-failed-pusher-in-decel*nav-lost
+    (state <s> ^landing decelerate
+              -^emergency-land yes
+              -^maintain-wing-borne yes
+               ^capabilities.navigation lost)
+-->
+    (<s> ^operator <o> + > =)
+    (<o> ^name cut-failed-pusher-in-decel)
+}
+
+sp {failure*propose*cut-failed-pusher-in-decel*altitude-lost
+    (state <s> ^landing decelerate
+              -^emergency-land yes
+              -^maintain-wing-borne yes
+               ^capabilities.altitude-sensing lost)
+-->
+    (<s> ^operator <o> + > =)
+    (<o> ^name cut-failed-pusher-in-decel)
+}
+
+sp {failure*apply*cut-failed-pusher-in-decel*pusher
+    (state <s> ^executing-failure-response yes
+               ^landing decelerate
+               ^capabilities.pusher failed
                ^io.output-link <out>)
     (<out> ^pusher-throttle { <pt> <> 0.0 })
 -->
@@ -961,6 +1298,24 @@ sp {failure*apply*cut-failed-pusher-in-decel
     (<out> ^pusher-throttle <pt> - 0.0 +)
     (write (crlf) |[Failure Response] Pusher failed during approach -> cutting pusher throttle to 0.0|)
 }
+
+sp {failure*apply*cut-failed-pusher-in-decel*emergency-stop
+    (state <s> ^executing-failure-response yes
+               ^landing decelerate
+              -^emergency-land yes
+              -^maintain-wing-borne yes
+               ^capabilities <cap>)
+    (<cap> ^lift << full degraded >>)
+   -{
+     (<cap> ^pusher ok
+            ^navigation <> lost
+            ^altitude-sensing <> lost)
+    }
+-->
+    (<s> ^emergency-land yes)
+    (write (crlf) |[Failure Response] Critical propulsion/sensor loss on approach -> stopping in place for vertical descent|)
+}
+# E.CHANGE - AM
 
 # In an emergency/precautionary in-place landing, target airspeed is 0
 # immediately regardless of distance-to-target.
@@ -995,6 +1350,27 @@ sp {failure*propose*maintain-wing-borne-cruise*cut-lift-rotors
     (<s> ^operator <o> + > =)
     (<o> ^name maintain-wing-borne-cruise)
 }
+
+# S.CHANGE - AM (M3: also propose if pusher or autopilot is not at cruise setting)
+sp {failure*propose*maintain-wing-borne-cruise*ensure-pusher
+    (state <s> ^maintain-wing-borne yes
+               ^landing no
+               ^params.cruise-pusher <cp>
+               ^io.output-link.pusher-throttle <> <cp>)
+-->
+    (<s> ^operator <o> + > =)
+    (<o> ^name maintain-wing-borne-cruise)
+}
+
+sp {failure*propose*maintain-wing-borne-cruise*ensure-autopilot
+    (state <s> ^maintain-wing-borne yes
+               ^landing no
+               ^io.output-link.autopilot <> on)
+-->
+    (<s> ^operator <o> + > =)
+    (<o> ^name maintain-wing-borne-cruise)
+}
+# E.CHANGE - AM
 
 sp {failure*apply*maintain-wing-borne-cruise*throttle-off
     (state <s> ^operator.name maintain-wing-borne-cruise
@@ -1040,7 +1416,8 @@ sp {failure*apply*maintain-wing-borne-cruise*clear-emergency-land
 ##############################################
 ### RESPONSE 8: EMERGENCY DESCENT ON TOTAL PROPULSION LOSS IN CRUISE
 ### If both >=2 lift rotors and the pusher prop have failed in horizontal
-### flight, neither wing-borne cruise nor normal hover is available.
+### flight (or >=2 lift rotors fail after vertical descent has already
+### started), neither wing-borne cruise nor normal hover is available.
 ### Disengage the AP, cut the pusher, and command maximum remaining lift (1.0)
 ### in vertical-descent to minimize sink rate until touchdown.
 ##############################################
@@ -1054,6 +1431,19 @@ sp {failure*propose*emergency-all-propulsion-loss
     (<s> ^operator <o> + > =)
     (<o> ^name emergency-all-propulsion-loss)
 }
+
+# S.CHANGE - AM (M3: handle critical lift loss occurring during vertical-descent)
+sp {failure*propose*emergency-all-propulsion-loss*in-vertical-descent
+    (state <s> ^flight-mode vertical
+               ^landing vertical-descent
+              -^climb-aborted yes
+               ^capabilities.lift critical
+               ^io.output-link.throttle < 1.0)
+-->
+    (<s> ^operator <o> + > =)
+    (<o> ^name emergency-all-propulsion-loss)
+}
+# E.CHANGE - AM
 
 sp {failure*apply*emergency-all-propulsion-loss
     (state <s> ^operator.name emergency-all-propulsion-loss
@@ -1101,8 +1491,8 @@ sp {failure*apply*emergency-all-propulsion-loss*vtol-vertical
 ##############################################
 ### RESPONSE 9: RESUME NORMAL CRUISE WHEN FAILURES ARE CLEARED
 ### If an in-place failure landing (^emergency-land yes) was slowing down in
-### horizontal flight and the user clears all failures in the Failure Panel,
-### resume normal horizontal cruise toward the destination.
+### horizontal flight and the user clears all landing-critical failures in
+### the Failure Panel, resume normal horizontal cruise toward the destination.
 ##############################################
 sp {failure*propose*resume-normal-flight
     (state <s> ^flight-mode horizontal
@@ -1147,10 +1537,11 @@ sp {failure*apply*resume-normal-flight*pusher
 
 ##############################################
 ### OPERATOR PRECEDENCE - order failure-handling, flight-phase transition,
-### and alert-handling operators so simultaneous proposals never tie.
+### navigation, and alert-handling operators so simultaneous proposals never
+### tie, even when multiple failures occur in parallel.
 ##############################################
 
-# Touchdown and pilot abort-landing always take top priority.
+# 1. Touchdown and pilot abort-landing always take top priority.
 sp {failure*compare*touchdown-and-abort-first
     (state <s> ^operator <o1> +
                ^operator { <o2> <> <o1> } +)
@@ -1160,13 +1551,66 @@ sp {failure*compare*touchdown-and-abort-first
     (<s> ^operator <o1> > <o2>)
 }
 
-# Failure recognition, clearing, and parameter adaptation run before response
-# and flight operators so capabilities and parameters are up to date.
-sp {failure*compare*recognition-and-params-before-others
+# S.CHANGE - AM (M3: primary failure maneuver operators execute first and trigger
+# recognition, sensor failover, and parameter adaptation in parallel on the same cycle)
+# 2. Primary failure maneuver operators run next; because they elaborate
+# ^executing-failure-response yes, any pending recognize-failure, clear-failure,
+# switch-position-sensor, and adapt-lift-params actions fire in parallel during
+# the same apply phase.
+sp {failure*compare*primary-failure-responses-first
     (state <s> ^operator <o1> +
                ^operator { <o2> <> <o1> } +)
-    (<o1> ^name << recognize-failure clear-failure adapt-lift-params >>)
-    (<o2> -^name << touchdown abort-landing recognize-failure clear-failure adapt-lift-params >>)
+    (<o1> ^name << abort-takeoff abort-climb-and-land
+                   emergency-all-propulsion-loss maintain-wing-borne-cruise
+                   failure-begin-landing cut-failed-pusher-in-decel
+                   resume-normal-flight >>)
+    (<o2> -^name << touchdown abort-landing abort-takeoff abort-climb-and-land
+                    emergency-all-propulsion-loss maintain-wing-borne-cruise
+                    failure-begin-landing cut-failed-pusher-in-decel
+                    resume-normal-flight >>)
+-->
+    (<s> ^operator <o1> > <o2>)
+}
+
+sp {failure*compare*primary-failure-responses-indifferent
+    (state <s> ^operator <o1> +
+               ^operator { <o2> <> <o1> } +)
+    (<o1> ^name << abort-takeoff abort-climb-and-land
+                   emergency-all-propulsion-loss maintain-wing-borne-cruise
+                   failure-begin-landing cut-failed-pusher-in-decel
+                   resume-normal-flight >>)
+    (<o2> ^name << abort-takeoff abort-climb-and-land
+                   emergency-all-propulsion-loss maintain-wing-borne-cruise
+                   failure-begin-landing cut-failed-pusher-in-decel
+                   resume-normal-flight >>)
+-->
+    (<s> ^operator <o1> = <o2>)
+}
+
+# 3. Standalone sensor failover, parameter adaptation, and failure recognition
+# or clearing run before normal flight and alert operators (and execute all
+# pending secondary failure actions in parallel via ^executing-failure-response).
+sp {failure*compare*switch-sensor-before-recognition-and-flight
+    (state <s> ^operator <o1> +
+               ^operator { <o2> <> <o1> } +)
+    (<o1> ^name switch-position-sensor)
+    (<o2> -^name << touchdown abort-landing abort-takeoff abort-climb-and-land
+                    emergency-all-propulsion-loss maintain-wing-borne-cruise
+                    failure-begin-landing cut-failed-pusher-in-decel
+                    resume-normal-flight switch-position-sensor >>)
+-->
+    (<s> ^operator <o1> > <o2>)
+}
+
+sp {failure*compare*recognition-and-params-before-flight
+    (state <s> ^operator <o1> +
+               ^operator { <o2> <> <o1> } +)
+    (<o1> ^name << adapt-lift-params recognize-failure clear-failure >>)
+    (<o2> -^name << touchdown abort-landing abort-takeoff abort-climb-and-land
+                    emergency-all-propulsion-loss maintain-wing-borne-cruise
+                    failure-begin-landing cut-failed-pusher-in-decel
+                    resume-normal-flight switch-position-sensor
+                    adapt-lift-params recognize-failure clear-failure >>)
 -->
     (<s> ^operator <o1> > <o2>)
 }
@@ -1174,58 +1618,32 @@ sp {failure*compare*recognition-and-params-before-others
 sp {failure*compare*recognition-and-params-indifferent
     (state <s> ^operator <o1> +
                ^operator { <o2> <> <o1> } +)
-    (<o1> ^name << recognize-failure clear-failure adapt-lift-params >>)
-    (<o2> ^name << recognize-failure clear-failure adapt-lift-params >>)
+    (<o1> ^name << adapt-lift-params recognize-failure clear-failure >>)
+    (<o2> ^name << adapt-lift-params recognize-failure clear-failure >>)
 -->
     (<s> ^operator <o1> = <o2>)
 }
 
-# Switching to a working backup position sensor runs before initiating any
-# landing decision so navigation data comes from the healthy sensor first.
-sp {failure*compare*switch-sensor-before-landing
-    (state <s> ^operator <o1> +
-               ^operator { <o2> <> <o1> } +)
-    (<o1> ^name switch-position-sensor)
-    (<o2> -^name << touchdown abort-landing recognize-failure clear-failure adapt-lift-params switch-position-sensor >>)
--->
-    (<s> ^operator <o1> > <o2>)
-}
-
-# Failure response operators take priority over normal flight and alert operators.
-sp {failure*compare*failure-responses-before-flight
-    (state <s> ^operator <o1> +
-               ^operator { <o2> <> <o1> } +)
-    (<o1> ^name << abort-takeoff abort-climb-and-land failure-begin-landing
-                   cut-failed-pusher-in-decel maintain-wing-borne-cruise
-                   emergency-all-propulsion-loss resume-normal-flight >>)
-    (<o2> -^name << touchdown abort-landing recognize-failure clear-failure
-                    adapt-lift-params switch-position-sensor abort-takeoff
-                    abort-climb-and-land failure-begin-landing
-                    cut-failed-pusher-in-decel maintain-wing-borne-cruise
-                    emergency-all-propulsion-loss resume-normal-flight >>)
--->
-    (<s> ^operator <o1> > <o2>)
-}
-
-sp {failure*compare*failure-responses-indifferent
-    (state <s> ^operator <o1> +
-               ^operator { <o2> <> <o1> } +)
-    (<o1> ^name << abort-takeoff abort-climb-and-land failure-begin-landing
-                   cut-failed-pusher-in-decel maintain-wing-borne-cruise
-                   emergency-all-propulsion-loss resume-normal-flight >>)
-    (<o2> ^name << abort-takeoff abort-climb-and-land failure-begin-landing
-                   cut-failed-pusher-in-decel maintain-wing-borne-cruise
-                   emergency-all-propulsion-loss resume-normal-flight >>)
--->
-    (<s> ^operator <o1> = <o2>)
-}
-
-# Normal flight phase transitions take priority over alert-handling and
-# continuous throttle/pusher adjustment operators.
-sp {failure*compare*flight-transitions-before-alerts
+# 4. Normal flight phase transitions take priority over heading updates,
+# alert-handling, and continuous throttle/pusher adjustment operators.
+sp {failure*compare*flight-transitions-before-navigation-and-alerts
     (state <s> ^operator <o1> +
                ^operator { <o2> <> <o1> } +)
     (<o1> ^name << takeoff begin-cruise begin-landing start-vertical-descent >>)
+    (<o2> ^name << follow-bearing warn do-not-warn decision record-user-response
+                   record-changed-error-gps record-changed-error-lidar
+                   record-changed-error-imu adjust-pusher
+                   adjust-lift-pitch adjust-lift >>)
+-->
+    (<s> ^operator <o1> > <o2>)
+}
+
+# 5. Heading updates (follow-bearing, which has > preference in flight-phases.soar)
+# take priority over alert-handling and continuous throttle/pusher adjustments.
+sp {failure*compare*follow-bearing-before-alerts-and-adjustments
+    (state <s> ^operator <o1> +
+               ^operator { <o2> <> <o1> } +)
+    (<o1> ^name follow-bearing)
     (<o2> ^name << warn do-not-warn decision record-user-response
                    record-changed-error-gps record-changed-error-lidar
                    record-changed-error-imu adjust-pusher
@@ -1233,3 +1651,16 @@ sp {failure*compare*flight-transitions-before-alerts
 -->
     (<s> ^operator <o1> > <o2>)
 }
+
+# 6. When multiple sensors change error simultaneously, prefer warn over
+# do-not-warn if any sensor is in a safety warn-condition.
+sp {failure*compare*warn-before-do-not-warn*safety
+    (state <s> ^{ <err-info> << gps-error-info lidar-error-info imu-error-info >> }.warn-condition safety
+               ^operator <o1> +
+               ^operator { <o2> <> <o1> } +)
+    (<o1> ^name warn)
+    (<o2> ^name do-not-warn)
+-->
+    (<s> ^operator <o1> > <o2>)
+}
+# E.CHANGE - AM
